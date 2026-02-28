@@ -665,7 +665,18 @@ class ExportService {
       case 42: return '[名片]'
       case 43: return '[视频]'
       case 47: return '[动画表情]'
-      case 48: return '[位置]'
+      case 48: {
+        const normalized48 = this.normalizeAppMessageContent(content)
+        const locPoiname = this.extractXmlAttribute(normalized48, 'location', 'poiname') || this.extractXmlValue(normalized48, 'poiname') || this.extractXmlValue(normalized48, 'poiName')
+        const locLabel = this.extractXmlAttribute(normalized48, 'location', 'label') || this.extractXmlValue(normalized48, 'label')
+        const locLat = this.extractXmlAttribute(normalized48, 'location', 'x') || this.extractXmlAttribute(normalized48, 'location', 'latitude')
+        const locLng = this.extractXmlAttribute(normalized48, 'location', 'y') || this.extractXmlAttribute(normalized48, 'location', 'longitude')
+        const locParts: string[] = []
+        if (locPoiname) locParts.push(locPoiname)
+        if (locLabel && locLabel !== locPoiname) locParts.push(locLabel)
+        if (locLat && locLng) locParts.push(`(${locLat},${locLng})`)
+        return locParts.length > 0 ? `[位置] ${locParts.join(' ')}` : '[位置]'
+      }
       case 49: {
         const title = this.extractXmlValue(content, 'title')
         const type = this.extractXmlValue(content, 'type')
@@ -776,12 +787,15 @@ class ExportService {
     }
     if (localType === 48) {
       const normalized = this.normalizeAppMessageContent(safeContent)
-      const location =
-        this.extractXmlValue(normalized, 'label') ||
-        this.extractXmlValue(normalized, 'poiname') ||
-        this.extractXmlValue(normalized, 'poiName') ||
-        this.extractXmlValue(normalized, 'name')
-      return location ? `[定位]${location}` : '[定位]'
+      const locPoiname = this.extractXmlAttribute(normalized, 'location', 'poiname') || this.extractXmlValue(normalized, 'poiname') || this.extractXmlValue(normalized, 'poiName')
+      const locLabel = this.extractXmlAttribute(normalized, 'location', 'label') || this.extractXmlValue(normalized, 'label')
+      const locLat = this.extractXmlAttribute(normalized, 'location', 'x') || this.extractXmlAttribute(normalized, 'location', 'latitude')
+      const locLng = this.extractXmlAttribute(normalized, 'location', 'y') || this.extractXmlAttribute(normalized, 'location', 'longitude')
+      const locParts: string[] = []
+      if (locPoiname) locParts.push(locPoiname)
+      if (locLabel && locLabel !== locPoiname) locParts.push(locLabel)
+      if (locLat && locLng) locParts.push(`(${locLat},${locLng})`)
+      return locParts.length > 0 ? `[位置] ${locParts.join(' ')}` : '[位置]'
     }
     if (localType === 50) {
       return this.parseVoipMessage(safeContent)
@@ -977,6 +991,12 @@ class ExportService {
       return match[1].replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').trim()
     }
     return ''
+  }
+
+  private extractXmlAttribute(xml: string, tagName: string, attrName: string): string {
+    const tagRegex = new RegExp(`<${tagName}\\s+[^>]*${attrName}\\s*=\\s*"([^"]*)"`, 'i')
+    const match = tagRegex.exec(xml)
+    return match ? match[1] : ''
   }
 
   private cleanSystemMessage(content: string): string {
@@ -2932,7 +2952,7 @@ class ExportService {
           options.displayNamePreference || 'remark'
         )
 
-        allMessages.push({
+        const msgObj: any = {
           localId: allMessages.length + 1,
           createTime: msg.createTime,
           formattedTime: this.formatTimestamp(msg.createTime),
@@ -2944,7 +2964,17 @@ class ExportService {
           senderDisplayName,
           source,
           senderAvatarKey: msg.senderUsername
-        })
+        }
+
+        // 位置消息：附加结构化位置字段
+        if (msg.localType === 48) {
+          if (msg.locationLat != null) msgObj.locationLat = msg.locationLat
+          if (msg.locationLng != null) msgObj.locationLng = msg.locationLng
+          if (msg.locationPoiname) msgObj.locationPoiname = msg.locationPoiname
+          if (msg.locationLabel) msgObj.locationLabel = msg.locationLabel
+        }
+
+        allMessages.push(msgObj)
       }
 
       allMessages.sort((a, b) => a.createTime - b.createTime)
