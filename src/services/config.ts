@@ -40,6 +40,7 @@ export const CONFIG_KEYS = {
   EXPORT_SNS_STATS_CACHE_MAP: 'exportSnsStatsCacheMap',
   CONTACTS_LOAD_TIMEOUT_MS: 'contactsLoadTimeoutMs',
   CONTACTS_LIST_CACHE_MAP: 'contactsListCacheMap',
+  CONTACTS_AVATAR_CACHE_MAP: 'contactsAvatarCacheMap',
 
   // 安全
   AUTH_ENABLED: 'authEnabled',
@@ -477,6 +478,17 @@ export interface ContactsListCacheItem {
   contacts: ContactsListCacheContact[]
 }
 
+export interface ContactsAvatarCacheEntry {
+  avatarUrl: string
+  updatedAt: number
+  checkedAt: number
+}
+
+export interface ContactsAvatarCacheItem {
+  updatedAt: number
+  avatars: Record<string, ContactsAvatarCacheEntry>
+}
+
 export async function getExportSessionMessageCountCache(scopeKey: string): Promise<ExportSessionMessageCountCacheItem | null> {
   if (!scopeKey) return null
   const value = await config.get(CONFIG_KEYS.EXPORT_SESSION_MESSAGE_COUNT_CACHE_MAP)
@@ -648,6 +660,94 @@ export async function setContactsListCache(scopeKey: string, contacts: ContactsL
     contacts: normalized
   }
   await config.set(CONFIG_KEYS.CONTACTS_LIST_CACHE_MAP, map)
+}
+
+export async function getContactsAvatarCache(scopeKey: string): Promise<ContactsAvatarCacheItem | null> {
+  if (!scopeKey) return null
+  const value = await config.get(CONFIG_KEYS.CONTACTS_AVATAR_CACHE_MAP)
+  if (!value || typeof value !== 'object') return null
+  const rawMap = value as Record<string, unknown>
+  const rawItem = rawMap[scopeKey]
+  if (!rawItem || typeof rawItem !== 'object') return null
+
+  const rawUpdatedAt = (rawItem as Record<string, unknown>).updatedAt
+  const rawAvatars = (rawItem as Record<string, unknown>).avatars
+  if (!rawAvatars || typeof rawAvatars !== 'object') return null
+
+  const avatars: Record<string, ContactsAvatarCacheEntry> = {}
+  for (const [rawUsername, rawEntry] of Object.entries(rawAvatars as Record<string, unknown>)) {
+    const username = rawUsername.trim()
+    if (!username) continue
+
+    if (typeof rawEntry === 'string') {
+      const avatarUrl = rawEntry.trim()
+      if (!avatarUrl) continue
+      avatars[username] = {
+        avatarUrl,
+        updatedAt: typeof rawUpdatedAt === 'number' && Number.isFinite(rawUpdatedAt) ? rawUpdatedAt : 0,
+        checkedAt: typeof rawUpdatedAt === 'number' && Number.isFinite(rawUpdatedAt) ? rawUpdatedAt : 0
+      }
+      continue
+    }
+
+    if (!rawEntry || typeof rawEntry !== 'object') continue
+    const entry = rawEntry as Record<string, unknown>
+    const avatarUrl = typeof entry.avatarUrl === 'string' ? entry.avatarUrl.trim() : ''
+    if (!avatarUrl) continue
+    const updatedAt = typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
+      ? entry.updatedAt
+      : 0
+    const checkedAt = typeof entry.checkedAt === 'number' && Number.isFinite(entry.checkedAt)
+      ? entry.checkedAt
+      : updatedAt
+
+    avatars[username] = {
+      avatarUrl,
+      updatedAt,
+      checkedAt
+    }
+  }
+
+  return {
+    updatedAt: typeof rawUpdatedAt === 'number' && Number.isFinite(rawUpdatedAt) ? rawUpdatedAt : 0,
+    avatars
+  }
+}
+
+export async function setContactsAvatarCache(
+  scopeKey: string,
+  avatars: Record<string, ContactsAvatarCacheEntry>
+): Promise<void> {
+  if (!scopeKey) return
+  const current = await config.get(CONFIG_KEYS.CONTACTS_AVATAR_CACHE_MAP)
+  const map = current && typeof current === 'object'
+    ? { ...(current as Record<string, unknown>) }
+    : {}
+
+  const normalized: Record<string, ContactsAvatarCacheEntry> = {}
+  for (const [rawUsername, rawEntry] of Object.entries(avatars || {})) {
+    const username = String(rawUsername || '').trim()
+    if (!username || !rawEntry || typeof rawEntry !== 'object') continue
+    const avatarUrl = String(rawEntry.avatarUrl || '').trim()
+    if (!avatarUrl) continue
+    const updatedAt = Number.isFinite(rawEntry.updatedAt)
+      ? Math.max(0, Math.floor(rawEntry.updatedAt))
+      : Date.now()
+    const checkedAt = Number.isFinite(rawEntry.checkedAt)
+      ? Math.max(0, Math.floor(rawEntry.checkedAt))
+      : updatedAt
+    normalized[username] = {
+      avatarUrl,
+      updatedAt,
+      checkedAt
+    }
+  }
+
+  map[scopeKey] = {
+    updatedAt: Date.now(),
+    avatars: normalized
+  }
+  await config.set(CONFIG_KEYS.CONTACTS_AVATAR_CACHE_MAP, map)
 }
 
 // === 安全相关 ===

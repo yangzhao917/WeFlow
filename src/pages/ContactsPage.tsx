@@ -25,6 +25,7 @@ const SEARCH_DEBOUNCE_MS = 120
 const VIRTUAL_ROW_HEIGHT = 76
 const VIRTUAL_OVERSCAN = 10
 const DEFAULT_CONTACTS_LOAD_TIMEOUT_MS = 3000
+const AVATAR_RECHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 interface ContactsLoadSession {
     requestId: string
@@ -91,8 +92,10 @@ function ContactsPage() {
     const [diagnosticTick, setDiagnosticTick] = useState(Date.now())
     const [contactsDataSource, setContactsDataSource] = useState<ContactsDataSource>(null)
     const [contactsUpdatedAt, setContactsUpdatedAt] = useState<number | null>(null)
+    const [avatarCacheUpdatedAt, setAvatarCacheUpdatedAt] = useState<number | null>(null)
     const contactsLoadTimeoutMsRef = useRef(DEFAULT_CONTACTS_LOAD_TIMEOUT_MS)
     const contactsCacheScopeRef = useRef('default')
+    const contactsAvatarCacheRef = useRef<Record<string, configService.ContactsAvatarCacheEntry>>({})
 
     const ensureContactsCacheScope = useCallback(async () => {
         if (contactsCacheScopeRef.current !== 'default') {
@@ -129,6 +132,85 @@ function ContactsPage() {
     useEffect(() => {
         contactsLoadTimeoutMsRef.current = contactsLoadTimeoutMs
     }, [contactsLoadTimeoutMs])
+
+    const mergeAvatarCacheIntoContacts = useCallback((sourceContacts: ContactInfo[]): ContactInfo[] => {
+        const avatarCache = contactsAvatarCacheRef.current
+        if (!sourceContacts.length || Object.keys(avatarCache).length === 0) {
+            return sourceContacts
+        }
+        let changed = false
+        const merged = sourceContacts.map((contact) => {
+            const cachedAvatar = avatarCache[contact.username]?.avatarUrl
+            if (!cachedAvatar || contact.avatarUrl) {
+                return contact
+            }
+            changed = true
+            return {
+                ...contact,
+                avatarUrl: cachedAvatar
+            }
+        })
+        return changed ? merged : sourceContacts
+    }, [])
+
+    const upsertAvatarCacheFromContacts = useCallback((
+        scopeKey: string,
+        sourceContacts: ContactInfo[],
+        options?: { prune?: boolean; markCheckedUsernames?: string[] }
+    ) => {
+        if (!scopeKey) return
+        const nextCache = { ...contactsAvatarCacheRef.current }
+        const now = Date.now()
+        const markCheckedSet = new Set((options?.markCheckedUsernames || []).filter(Boolean))
+        const usernamesInSource = new Set<string>()
+        let changed = false
+
+        for (const contact of sourceContacts) {
+            const username = String(contact.username || '').trim()
+            if (!username) continue
+            usernamesInSource.add(username)
+            const prev = nextCache[username]
+            const avatarUrl = String(contact.avatarUrl || '').trim()
+            if (!avatarUrl) continue
+            const updatedAt = !prev || prev.avatarUrl !== avatarUrl ? now : prev.updatedAt
+            const checkedAt = markCheckedSet.has(username) ? now : (prev?.checkedAt || now)
+            if (!prev || prev.avatarUrl !== avatarUrl || prev.updatedAt !== updatedAt || prev.checkedAt !== checkedAt) {
+                nextCache[username] = {
+                    avatarUrl,
+                    updatedAt,
+                    checkedAt
+                }
+                changed = true
+            }
+        }
+
+        for (const username of markCheckedSet) {
+            const prev = nextCache[username]
+            if (!prev) continue
+            if (prev.checkedAt !== now) {
+                nextCache[username] = {
+                    ...prev,
+                    checkedAt: now
+                }
+                changed = true
+            }
+        }
+
+        if (options?.prune) {
+            for (const username of Object.keys(nextCache)) {
+                if (usernamesInSource.has(username)) continue
+                delete nextCache[username]
+                changed = true
+            }
+        }
+
+        if (!changed) return
+        contactsAvatarCacheRef.current = nextCache
+        setAvatarCacheUpdatedAt(now)
+        void configService.setContactsAvatarCache(scopeKey, nextCache).catch((error) => {
+            console.error('写入通讯录头像缓存失败:', error)
+        })
+    }, [])
 
     const applyEnrichedContacts = useCallback((enrichedMap: Record<string, ContactEnrichInfo>) => {
         if (!enrichedMap || Object.keys(enrichedMap).length === 0) return
@@ -170,8 +252,34 @@ function ContactsPage() {
         })
     }, [])
 
-    const enrichContactsInBackground = useCallback(async (sourceContacts: ContactInfo[], loadVersion: number) => {
-        const usernames = sourceContacts.map(contact => contact.username).filter(Boolean)
+    const enrichContactsInBackground = useCallback(async (
+        sourceContacts: ContactInfo[],
+        loadVersion: number,
+        scopeKey: string
+    ) => {
+        const sourceByUsername = new Map<string, ContactInfo>()
+        for (const contact of sourceContacts) {
+            if (!contact.username) continue
+            sourceByUsername.set(contact.username, contact)
+        }
+        const now = Date.now()
+        const usernames = sourceContacts
+            .map(contact => contact.username)
+            .filter(Boolean)
+            .filter((username) => {
+                const currentContact = sourceByUsername.get(username)
+                if (!currentContact) return false
+                const cacheEntry = contactsAvatarCacheRef.current[username]
+                if (!cacheEntry || !cacheEntry.avatarUrl) {
+                    return !currentContact.avatarUrl
+                }
+                if (currentContact.avatarUrl && currentContact.avatarUrl !== cacheEntry.avatarUrl) {
+                    return true
+                }
+                const checkedAt = cacheEntry.checkedAt || 0
+                return now - checkedAt >= AVATAR_RECHECK_INTERVAL_MS
+            })
+
         const total = usernames.length
         setAvatarEnrichProgress({
             loaded: 0,
@@ -190,7 +298,22 @@ function ContactsPage() {
                 if (loadVersionRef.current !== loadVersion) return
                 if (avatarResult.success && avatarResult.contacts) {
                     applyEnrichedContacts(avatarResult.contacts)
+                    for (const [username, enriched] of Object.entries(avatarResult.contacts)) {
+                        const prev = sourceByUsername.get(username)
+                        if (!prev) continue
+                        sourceByUsername.set(username, {
+                            ...prev,
+                            displayName: enriched.displayName || prev.displayName,
+                            avatarUrl: enriched.avatarUrl || prev.avatarUrl
+                        })
+                    }
                 }
+                const batchContacts = batch
+                    .map(username => sourceByUsername.get(username))
+                    .filter((contact): contact is ContactInfo => Boolean(contact))
+                upsertAvatarCacheFromContacts(scopeKey, batchContacts, {
+                    markCheckedUsernames: batch
+                })
             } catch (e) {
                 console.error('分批补全头像失败:', e)
             }
@@ -204,7 +327,7 @@ function ContactsPage() {
 
             await new Promise(resolve => setTimeout(resolve, 0))
         }
-    }, [applyEnrichedContacts])
+    }, [applyEnrichedContacts, upsertAvatarCacheFromContacts])
 
     // 加载通讯录
     const loadContacts = useCallback(async (options?: { scopeKey?: string }) => {
@@ -256,21 +379,23 @@ function ContactsPage() {
                     window.clearTimeout(loadTimeoutTimerRef.current)
                     loadTimeoutTimerRef.current = null
                 }
-                setContacts(contactsResult.contacts)
-                syncContactTypeCounts(contactsResult.contacts)
+                const contactsWithAvatarCache = mergeAvatarCacheIntoContacts(contactsResult.contacts)
+                setContacts(contactsWithAvatarCache)
+                syncContactTypeCounts(contactsWithAvatarCache)
                 setSelectedUsernames(new Set())
                 setSelectedContact(prev => {
                     if (!prev) return prev
-                    return contactsResult.contacts!.find(contact => contact.username === prev.username) || null
+                    return contactsWithAvatarCache.find(contact => contact.username === prev.username) || null
                 })
                 const now = Date.now()
                 setContactsDataSource('network')
                 setContactsUpdatedAt(now)
                 setLoadIssue(null)
                 setIsLoading(false)
+                upsertAvatarCacheFromContacts(scopeKey, contactsWithAvatarCache, { prune: true })
                 void configService.setContactsListCache(
                     scopeKey,
-                    contactsResult.contacts.map(contact => ({
+                    contactsWithAvatarCache.map(contact => ({
                         username: contact.username,
                         displayName: contact.displayName,
                         remark: contact.remark,
@@ -280,7 +405,7 @@ function ContactsPage() {
                 ).catch((error) => {
                     console.error('写入通讯录缓存失败:', error)
                 })
-                void enrichContactsInBackground(contactsResult.contacts, loadVersion)
+                void enrichContactsInBackground(contactsWithAvatarCache, loadVersion, scopeKey)
                 return
             }
             const elapsedMs = Date.now() - startedAt
@@ -314,7 +439,13 @@ function ContactsPage() {
                 setIsLoading(false)
             }
         }
-    }, [ensureContactsCacheScope, enrichContactsInBackground, syncContactTypeCounts])
+    }, [
+        ensureContactsCacheScope,
+        enrichContactsInBackground,
+        mergeAvatarCacheIntoContacts,
+        syncContactTypeCounts,
+        upsertAvatarCacheFromContacts
+    ])
 
     useEffect(() => {
         let cancelled = false
@@ -322,11 +453,17 @@ function ContactsPage() {
             const scopeKey = await ensureContactsCacheScope()
             if (cancelled) return
             try {
-                const cacheItem = await configService.getContactsListCache(scopeKey)
+                const [cacheItem, avatarCacheItem] = await Promise.all([
+                    configService.getContactsListCache(scopeKey),
+                    configService.getContactsAvatarCache(scopeKey)
+                ])
+                const avatarCacheMap = avatarCacheItem?.avatars || {}
+                contactsAvatarCacheRef.current = avatarCacheMap
+                setAvatarCacheUpdatedAt(avatarCacheItem?.updatedAt || null)
                 if (!cancelled && cacheItem && Array.isArray(cacheItem.contacts) && cacheItem.contacts.length > 0) {
                     const cachedContacts: ContactInfo[] = cacheItem.contacts.map(contact => ({
                         ...contact,
-                        avatarUrl: undefined
+                        avatarUrl: avatarCacheMap[contact.username]?.avatarUrl
                     }))
                     setContacts(cachedContacts)
                     syncContactTypeCounts(cachedContacts)
@@ -502,6 +639,17 @@ function ContactsPage() {
         if (!contactsUpdatedAt) return ''
         return new Date(contactsUpdatedAt).toLocaleString()
     }, [contactsUpdatedAt])
+
+    const avatarCachedCount = useMemo(() => {
+        return contacts.reduce((count, contact) => (
+            contact.avatarUrl ? count + 1 : count
+        ), 0)
+    }, [contacts])
+
+    const avatarCacheUpdatedAtLabel = useMemo(() => {
+        if (!avatarCacheUpdatedAt) return ''
+        return new Date(avatarCacheUpdatedAt).toLocaleString()
+    }, [avatarCacheUpdatedAt])
 
     const toggleContactSelected = (username: string, checked: boolean) => {
         setSelectedUsernames(prev => {
@@ -684,6 +832,12 @@ function ContactsPage() {
                     {contactsUpdatedAt && (
                         <span className="contacts-cache-meta">
                             {contactsDataSource === 'cache' ? '缓存' : '最新'} · 更新于 {contactsUpdatedAtLabel}
+                        </span>
+                    )}
+                    {contacts.length > 0 && (
+                        <span className="contacts-cache-meta">
+                            头像缓存 {avatarCachedCount}/{contacts.length}
+                            {avatarCacheUpdatedAtLabel ? ` · 更新于 ${avatarCacheUpdatedAtLabel}` : ''}
                         </span>
                     )}
                     {isLoading && contacts.length > 0 && (
