@@ -151,6 +151,10 @@ const contentTypeLabels: Record<ContentType, string> = {
   emoji: '表情包'
 }
 
+const getContentTypeLabel = (type: ContentType): string => {
+  return contentTypeLabels[type] || type
+}
+
 const formatOptions: Array<{ value: TextExportFormat; label: string; desc: string }> = [
   { value: 'chatlab', label: 'ChatLab', desc: '标准格式，支持其他软件导入' },
   { value: 'chatlab-jsonl', label: 'ChatLab JSONL', desc: '流式格式，适合大量消息' },
@@ -383,6 +387,14 @@ const formatYmdHmDateTime = (timestamp?: number): string => {
   const h = `${d.getHours()}`.padStart(2, '0')
   const min = `${d.getMinutes()}`.padStart(2, '0')
   return `${y}-${m}-${day} ${h}:${min}`
+}
+
+const formatPathBrief = (value: string, maxLength = 52): string => {
+  const normalized = String(value || '')
+  if (normalized.length <= maxLength) return normalized
+  const headLength = Math.max(10, Math.floor(maxLength * 0.55))
+  const tailLength = Math.max(8, maxLength - headLength - 1)
+  return `${normalized.slice(0, headLength)}…${normalized.slice(-tailLength)}`
 }
 
 const formatRecentExportTime = (timestamp?: number, now = Date.now()): string => {
@@ -931,6 +943,7 @@ function ExportPage() {
   const [tasks, setTasks] = useState<ExportTask[]>([])
   const [lastExportBySession, setLastExportBySession] = useState<Record<string, number>>({})
   const [lastExportByContent, setLastExportByContent] = useState<Record<string, number>>({})
+  const [exportRecordsBySession, setExportRecordsBySession] = useState<Record<string, configService.ExportSessionRecordEntry[]>>({})
   const [lastSnsExportPostCount, setLastSnsExportPostCount] = useState(0)
   const [snsStats, setSnsStats] = useState<{ totalPosts: number; totalFriends: number }>({
     totalPosts: 0,
@@ -1331,7 +1344,7 @@ function ExportPage() {
     setIsBaseConfigLoading(true)
     let isReady = true
     try {
-      const [savedPath, savedFormat, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedTxtColumns, savedConcurrency, savedWriteLayout, savedSessionMap, savedContentMap, savedSnsPostCount, exportCacheScope] = await Promise.all([
+      const [savedPath, savedFormat, savedMedia, savedVoiceAsText, savedExcelCompactColumns, savedTxtColumns, savedConcurrency, savedWriteLayout, savedSessionMap, savedContentMap, savedSessionRecordMap, savedSnsPostCount, exportCacheScope] = await Promise.all([
         configService.getExportPath(),
         configService.getExportDefaultFormat(),
         configService.getExportDefaultMedia(),
@@ -1342,6 +1355,7 @@ function ExportPage() {
         configService.getExportWriteLayout(),
         configService.getExportLastSessionRunMap(),
         configService.getExportLastContentRunMap(),
+        configService.getExportSessionRecordMap(),
         configService.getExportLastSnsPostCount(),
         ensureExportCacheScope()
       ])
@@ -1358,6 +1372,7 @@ function ExportPage() {
       setWriteLayout(savedWriteLayout)
       setLastExportBySession(savedSessionMap)
       setLastExportByContent(savedContentMap)
+      setExportRecordsBySession(savedSessionRecordMap)
       setLastSnsExportPostCount(savedSnsPostCount)
 
       if (cachedSnsStats && Date.now() - cachedSnsStats.updatedAt <= EXPORT_SNS_STATS_CACHE_STALE_MS) {
@@ -2252,6 +2267,67 @@ function ExportPage() {
     })
   }, [])
 
+  const resolveTaskExportContentLabel = useCallback((payload: ExportTaskPayload): string => {
+    if (payload.scope === 'content' && payload.contentType) {
+      return getContentTypeLabel(payload.contentType)
+    }
+    if (payload.scope === 'sns') return '朋友圈'
+
+    const labels: string[] = ['聊天文本']
+    const opts = payload.options
+    if (opts?.exportMedia) {
+      if (opts.exportImages) labels.push('图片')
+      if (opts.exportVoices) labels.push('语音')
+      if (opts.exportVideos) labels.push('视频')
+      if (opts.exportEmojis) labels.push('表情包')
+    }
+    return Array.from(new Set(labels)).join('、')
+  }, [])
+
+  const markSessionExportRecords = useCallback((
+    sessionIds: string[],
+    content: string,
+    outputDir: string,
+    exportTime: number
+  ) => {
+    const normalizedContent = String(content || '').trim()
+    const normalizedOutputDir = String(outputDir || '').trim()
+    const normalizedExportTime = Number.isFinite(exportTime) ? Math.max(0, Math.floor(exportTime)) : Date.now()
+    if (!normalizedContent || !normalizedOutputDir) return
+    if (!Array.isArray(sessionIds) || sessionIds.length === 0) return
+
+    setExportRecordsBySession(prev => {
+      const next: Record<string, configService.ExportSessionRecordEntry[]> = { ...prev }
+      let changed = false
+
+      for (const rawSessionId of sessionIds) {
+        const sessionId = String(rawSessionId || '').trim()
+        if (!sessionId) continue
+        const existingList = Array.isArray(next[sessionId]) ? [...next[sessionId]] : []
+        const lastRecord = existingList[existingList.length - 1]
+        if (
+          lastRecord &&
+          lastRecord.content === normalizedContent &&
+          lastRecord.outputDir === normalizedOutputDir &&
+          Math.abs(Number(lastRecord.exportTime || 0) - normalizedExportTime) <= 2000
+        ) {
+          continue
+        }
+        existingList.push({
+          exportTime: normalizedExportTime,
+          content: normalizedContent,
+          outputDir: normalizedOutputDir
+        })
+        next[sessionId] = existingList.slice(-80)
+        changed = true
+      }
+
+      if (!changed) return prev
+      void configService.setExportSessionRecordMap(next)
+      return next
+    })
+  }, [])
+
   const inferContentTypesFromOptions = (opts: ElectronExportOptions): ContentType[] => {
     const types: ContentType[] = ['text']
     if (opts.exportMedia) {
@@ -2286,6 +2362,7 @@ function ExportPage() {
         ? (task.performance || createEmptyTaskPerformance())
         : task.performance
     }))
+    const taskExportContentLabel = resolveTaskExportContentLabel(next.payload)
 
     progressUnsubscribeRef.current?.()
     const settledSessionIdsFromProgress = new Set<string>()
@@ -2323,6 +2400,7 @@ function ExportPage() {
             if (contentTypes.length > 0) {
               markContentExported([currentSessionId], contentTypes, now)
             }
+            markSessionExportRecords([currentSessionId], taskExportContentLabel, next.payload.outputDir, now)
           }
         }
 
@@ -2427,8 +2505,14 @@ function ExportPage() {
             ? result.successSessionIds
             : []
           if (successSessionIds.length > 0) {
-            markSessionExported(successSessionIds, doneAt)
-            markContentExported(successSessionIds, contentTypes, doneAt)
+            const unsettledSuccessSessionIds = successSessionIds.filter((sessionId) => !settledSessionIdsFromProgress.has(sessionId))
+            if (unsettledSuccessSessionIds.length > 0) {
+              markSessionExported(unsettledSuccessSessionIds, doneAt)
+              markSessionExportRecords(unsettledSuccessSessionIds, taskExportContentLabel, next.payload.outputDir, doneAt)
+              if (contentTypes.length > 0) {
+                markContentExported(unsettledSuccessSessionIds, contentTypes, doneAt)
+              }
+            }
           }
 
           updateTask(next.id, task => ({
@@ -2462,7 +2546,15 @@ function ExportPage() {
       runningTaskIdRef.current = null
       void runNextTask()
     }
-  }, [updateTask, markSessionExported, markContentExported, loadSnsStats, lastSnsExportPostCount])
+  }, [
+    updateTask,
+    markSessionExported,
+    markSessionExportRecords,
+    markContentExported,
+    resolveTaskExportContentLabel,
+    loadSnsStats,
+    lastSnsExportPostCount
+  ])
 
   useEffect(() => {
     void runNextTask()
@@ -2944,6 +3036,15 @@ function ExportPage() {
     }
     return map
   }, [contactsList])
+
+  const currentSessionExportRecords = useMemo(() => {
+    const sessionId = String(sessionDetail?.wxid || '').trim()
+    if (!sessionId) return [] as configService.ExportSessionRecordEntry[]
+    const records = Array.isArray(exportRecordsBySession[sessionId]) ? exportRecordsBySession[sessionId] : []
+    return [...records]
+      .sort((a, b) => Number(b.exportTime || 0) - Number(a.exportTime || 0))
+      .slice(0, 20)
+  }, [sessionDetail?.wxid, exportRecordsBySession])
 
   const applySessionDetailStats = useCallback((
     sessionId: string,
@@ -4249,6 +4350,42 @@ function ExportPage() {
                         <button className="copy-btn" title="复制" onClick={() => void handleCopyDetailField(sessionDetail.alias || '', 'alias')}>
                           {copiedDetailField === 'alias' ? <Check size={12} /> : <Copy size={12} />}
                         </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="detail-section">
+                    <div className="section-title">
+                      <ClipboardList size={14} />
+                      <span>导出记录（最近 20 条）</span>
+                    </div>
+                    {currentSessionExportRecords.length === 0 ? (
+                      <div className="detail-record-empty">暂无导出记录</div>
+                    ) : (
+                      <div className="detail-record-list">
+                        {currentSessionExportRecords.map((record, index) => (
+                          <div className="detail-record-item" key={`${record.exportTime}-${record.content}-${index}`}>
+                            <div className="record-row">
+                              <span className="label">导出时间</span>
+                              <span className="value">{formatYmdHmDateTime(record.exportTime)}</span>
+                            </div>
+                            <div className="record-row">
+                              <span className="label">导出内容</span>
+                              <span className="value">{record.content}</span>
+                            </div>
+                            <div className="record-row">
+                              <span className="label">导出目录</span>
+                              <span className="value path" title={record.outputDir}>{formatPathBrief(record.outputDir)}</span>
+                              <button
+                                className="detail-inline-btn"
+                                type="button"
+                                onClick={() => void window.electronAPI.shell.openPath(record.outputDir)}
+                              >
+                                打开
+                              </button>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>

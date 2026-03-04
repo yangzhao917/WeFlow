@@ -35,6 +35,7 @@ export const CONFIG_KEYS = {
   EXPORT_WRITE_LAYOUT: 'exportWriteLayout',
   EXPORT_LAST_SESSION_RUN_MAP: 'exportLastSessionRunMap',
   EXPORT_LAST_CONTENT_RUN_MAP: 'exportLastContentRunMap',
+  EXPORT_SESSION_RECORD_MAP: 'exportSessionRecordMap',
   EXPORT_LAST_SNS_POST_COUNT: 'exportLastSnsPostCount',
   EXPORT_SESSION_MESSAGE_COUNT_CACHE_MAP: 'exportSessionMessageCountCacheMap',
   EXPORT_SESSION_CONTENT_METRIC_CACHE_MAP: 'exportSessionContentMetricCacheMap',
@@ -441,6 +442,44 @@ export async function getExportLastContentRunMap(): Promise<Record<string, numbe
 
 export async function setExportLastContentRunMap(map: Record<string, number>): Promise<void> {
   await config.set(CONFIG_KEYS.EXPORT_LAST_CONTENT_RUN_MAP, map)
+}
+
+export interface ExportSessionRecordEntry {
+  exportTime: number
+  content: string
+  outputDir: string
+}
+
+export async function getExportSessionRecordMap(): Promise<Record<string, ExportSessionRecordEntry[]>> {
+  const value = await config.get(CONFIG_KEYS.EXPORT_SESSION_RECORD_MAP)
+  if (!value || typeof value !== 'object') return {}
+  const map: Record<string, ExportSessionRecordEntry[]> = {}
+  const entries = Object.entries(value as Record<string, unknown>)
+  for (const [sessionId, rawList] of entries) {
+    if (!Array.isArray(rawList)) continue
+    const normalizedList: ExportSessionRecordEntry[] = []
+    for (const rawItem of rawList) {
+      if (!rawItem || typeof rawItem !== 'object') continue
+      const exportTime = Number((rawItem as Record<string, unknown>).exportTime)
+      const content = String((rawItem as Record<string, unknown>).content || '').trim()
+      const outputDir = String((rawItem as Record<string, unknown>).outputDir || '').trim()
+      if (!Number.isFinite(exportTime) || exportTime <= 0) continue
+      if (!content || !outputDir) continue
+      normalizedList.push({
+        exportTime: Math.floor(exportTime),
+        content,
+        outputDir
+      })
+    }
+    if (normalizedList.length > 0) {
+      map[sessionId] = normalizedList
+    }
+  }
+  return map
+}
+
+export async function setExportSessionRecordMap(map: Record<string, ExportSessionRecordEntry[]>): Promise<void> {
+  await config.set(CONFIG_KEYS.EXPORT_SESSION_RECORD_MAP, map)
 }
 
 export async function getExportLastSnsPostCount(): Promise<number> {
