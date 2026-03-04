@@ -291,7 +291,7 @@ class SnsService {
     private configService: ConfigService
     private contactCache: ContactCacheService
     private imageCache = new Map<string, string>()
-    private exportStatsCache: { totalPosts: number; totalFriends: number; updatedAt: number } | null = null
+    private exportStatsCache: { totalPosts: number; totalFriends: number; myPosts: number | null; updatedAt: number } | null = null
     private readonly exportStatsCacheTtlMs = 5 * 60 * 1000
     private lastTimelineFallbackAt = 0
     private readonly timelineFallbackCooldownMs = 3 * 60 * 1000
@@ -512,11 +512,13 @@ class SnsService {
         return raw.trim()
     }
 
-    private async getExportStatsFromTimeline(): Promise<{ totalPosts: number; totalFriends: number }> {
+    private async getExportStatsFromTimeline(myWxid?: string): Promise<{ totalPosts: number; totalFriends: number; myPosts: number | null }> {
         const pageSize = 500
         const uniqueUsers = new Set<string>()
         let totalPosts = 0
+        let myPosts = 0
         let offset = 0
+        const normalizedMyWxid = this.toOptionalString(myWxid)
 
         for (let round = 0; round < 2000; round++) {
             const result = await wcdbService.getSnsTimeline(pageSize, offset, undefined, undefined, 0, 0)
@@ -531,6 +533,7 @@ class SnsService {
             for (const row of rows) {
                 const username = this.pickTimelineUsername(row)
                 if (username) uniqueUsers.add(username)
+                if (normalizedMyWxid && username === normalizedMyWxid) myPosts += 1
             }
 
             if (rows.length < pageSize) break
@@ -539,7 +542,8 @@ class SnsService {
 
         return {
             totalPosts,
-            totalFriends: uniqueUsers.size
+            totalFriends: uniqueUsers.size,
+            myPosts: normalizedMyWxid ? myPosts : null
         }
     }
 
@@ -735,9 +739,10 @@ class SnsService {
         }
     }
 
-    private async getExportStatsFromTableCount(): Promise<{ totalPosts: number; totalFriends: number }> {
+    private async getExportStatsFromTableCount(myWxid?: string): Promise<{ totalPosts: number; totalFriends: number; myPosts: number | null }> {
         let totalPosts = 0
         let totalFriends = 0
+        let myPosts: number | null = null
 
         const postCountResult = await wcdbService.execQuery('sns', null, 'SELECT COUNT(1) AS total FROM SnsTimeLine')
         if (postCountResult.success && postCountResult.rows && postCountResult.rows.length > 0) {
@@ -764,16 +769,40 @@ class SnsService {
             }
         }
 
-        return { totalPosts, totalFriends }
+        const normalizedMyWxid = this.toOptionalString(myWxid)
+        if (normalizedMyWxid) {
+            const myPostPrimary = await wcdbService.execQuery(
+                'sns',
+                null,
+                "SELECT COUNT(1) AS total FROM SnsTimeLine WHERE user_name = ?",
+                [normalizedMyWxid]
+            )
+            if (myPostPrimary.success && myPostPrimary.rows && myPostPrimary.rows.length > 0) {
+                myPosts = this.parseCountValue(myPostPrimary.rows[0])
+            } else {
+                const myPostFallback = await wcdbService.execQuery(
+                    'sns',
+                    null,
+                    "SELECT COUNT(1) AS total FROM SnsTimeLine WHERE userName = ?",
+                    [normalizedMyWxid]
+                )
+                if (myPostFallback.success && myPostFallback.rows && myPostFallback.rows.length > 0) {
+                    myPosts = this.parseCountValue(myPostFallback.rows[0])
+                }
+            }
+        }
+
+        return { totalPosts, totalFriends, myPosts }
     }
 
     async getExportStats(options?: {
         allowTimelineFallback?: boolean
         preferCache?: boolean
-    }): Promise<{ success: boolean; data?: { totalPosts: number; totalFriends: number }; error?: string }> {
+    }): Promise<{ success: boolean; data?: { totalPosts: number; totalFriends: number; myPosts: number | null }; error?: string }> {
         const allowTimelineFallback = options?.allowTimelineFallback ?? true
         const preferCache = options?.preferCache ?? false
         const now = Date.now()
+        const myWxid = this.toOptionalString(this.configService.get('myWxid'))
 
         try {
             if (preferCache && this.exportStatsCache && now - this.exportStatsCache.updatedAt <= this.exportStatsCacheTtlMs) {
@@ -781,12 +810,13 @@ class SnsService {
                     success: true,
                     data: {
                         totalPosts: this.exportStatsCache.totalPosts,
-                        totalFriends: this.exportStatsCache.totalFriends
+                        totalFriends: this.exportStatsCache.totalFriends,
+                        myPosts: this.exportStatsCache.myPosts
                     }
                 }
             }
 
-            let { totalPosts, totalFriends } = await this.getExportStatsFromTableCount()
+            let { totalPosts, totalFriends, myPosts } = await this.getExportStatsFromTableCount(myWxid)
             let fallbackAttempted = false
             let fallbackError = ''
 
@@ -798,13 +828,16 @@ class SnsService {
             ) {
                 fallbackAttempted = true
                 try {
-                    const timelineStats = await this.getExportStatsFromTimeline()
+                    const timelineStats = await this.getExportStatsFromTimeline(myWxid)
                     this.lastTimelineFallbackAt = Date.now()
                     if (timelineStats.totalPosts > 0) {
                         totalPosts = timelineStats.totalPosts
                     }
                     if (timelineStats.totalFriends > 0) {
                         totalFriends = timelineStats.totalFriends
+                    }
+                    if (timelineStats.myPosts !== null) {
+                        myPosts = timelineStats.myPosts
                     }
                 } catch (error) {
                     fallbackError = String(error)
@@ -814,7 +847,10 @@ class SnsService {
 
             const normalizedStats = {
                 totalPosts: Math.max(0, Number(totalPosts || 0)),
-                totalFriends: Math.max(0, Number(totalFriends || 0))
+                totalFriends: Math.max(0, Number(totalFriends || 0)),
+                myPosts: myWxid
+                    ? (myPosts === null ? null : Math.max(0, Number(myPosts || 0)))
+                    : null
             }
             const computedHasData = normalizedStats.totalPosts > 0 || normalizedStats.totalFriends > 0
             const cacheHasData = !!this.exportStatsCache && (this.exportStatsCache.totalPosts > 0 || this.exportStatsCache.totalFriends > 0)
@@ -825,7 +861,8 @@ class SnsService {
                     success: true,
                     data: {
                         totalPosts: this.exportStatsCache.totalPosts,
-                        totalFriends: this.exportStatsCache.totalFriends
+                        totalFriends: this.exportStatsCache.totalFriends,
+                        myPosts: this.exportStatsCache.myPosts
                     }
                 }
             }
@@ -838,6 +875,7 @@ class SnsService {
             this.exportStatsCache = {
                 totalPosts: normalizedStats.totalPosts,
                 totalFriends: normalizedStats.totalFriends,
+                myPosts: normalizedStats.myPosts,
                 updatedAt: Date.now()
             }
 
@@ -848,7 +886,8 @@ class SnsService {
                     success: true,
                     data: {
                         totalPosts: this.exportStatsCache.totalPosts,
-                        totalFriends: this.exportStatsCache.totalFriends
+                        totalFriends: this.exportStatsCache.totalFriends,
+                        myPosts: this.exportStatsCache.myPosts
                     }
                 }
             }
@@ -856,7 +895,7 @@ class SnsService {
         }
     }
 
-    async getExportStatsFast(): Promise<{ success: boolean; data?: { totalPosts: number; totalFriends: number }; error?: string }> {
+    async getExportStatsFast(): Promise<{ success: boolean; data?: { totalPosts: number; totalFriends: number; myPosts: number | null }; error?: string }> {
         return this.getExportStats({
             allowTimelineFallback: false,
             preferCache: true

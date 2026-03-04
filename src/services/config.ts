@@ -469,6 +469,7 @@ export interface ExportSnsStatsCacheItem {
 export interface SnsPageOverviewCache {
   totalPosts: number
   totalFriends: number
+  myPosts: number | null
   earliestTime: number | null
   latestTime: number | null
 }
@@ -610,12 +611,18 @@ export async function getSnsPageCache(scopeKey: string): Promise<SnsPageCacheIte
     if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.floor(v)
     return null
   }
+  const normalizeNullableCount = (v: unknown) => {
+    if (v === null || v === undefined) return null
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return Math.floor(v)
+    return null
+  }
 
   return {
     updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : 0,
     overviewStats: {
       totalPosts: Math.max(0, normalizeNumber(overviewObj.totalPosts)),
       totalFriends: Math.max(0, normalizeNumber(overviewObj.totalFriends)),
+      myPosts: normalizeNullableCount(overviewObj.myPosts),
       earliestTime: normalizeNullableTimestamp(overviewObj.earliestTime),
       latestTime: normalizeNullableTimestamp(overviewObj.latestTime)
     },
@@ -639,12 +646,18 @@ export async function setSnsPageCache(
     if (typeof v === 'number' && Number.isFinite(v) && v > 0) return Math.floor(v)
     return null
   }
+  const normalizeNullableCount = (v: unknown) => {
+    if (v === null || v === undefined) return null
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return Math.floor(v)
+    return null
+  }
 
   map[scopeKey] = {
     updatedAt: Date.now(),
     overviewStats: {
       totalPosts: normalizeNumber(payload?.overviewStats?.totalPosts),
       totalFriends: normalizeNumber(payload?.overviewStats?.totalFriends),
+      myPosts: normalizeNullableCount(payload?.overviewStats?.myPosts),
       earliestTime: normalizeNullableTimestamp(payload?.overviewStats?.earliestTime),
       latestTime: normalizeNullableTimestamp(payload?.overviewStats?.latestTime)
     },

@@ -25,6 +25,7 @@ interface Contact {
 interface SnsOverviewStats {
     totalPosts: number
     totalFriends: number
+    myPosts: number | null
     earliestTime: number | null
     latestTime: number | null
 }
@@ -39,6 +40,7 @@ export default function SnsPage() {
     const [overviewStats, setOverviewStats] = useState<SnsOverviewStats>({
         totalPosts: 0,
         totalFriends: 0,
+        myPosts: null,
         earliestTime: null,
         latestTime: null
     })
@@ -196,6 +198,9 @@ export default function SnsPage() {
                 setOverviewStats({
                     totalPosts: cachedTotalPosts,
                     totalFriends: cachedTotalFriends,
+                    myPosts: typeof cachedOverview.myPosts === 'number' && Number.isFinite(cachedOverview.myPosts) && cachedOverview.myPosts >= 0
+                        ? Math.floor(cachedOverview.myPosts)
+                        : null,
                     earliestTime: cachedOverview.earliestTime ?? null,
                     latestTime: cachedOverview.latestTime ?? null
                 })
@@ -234,6 +239,9 @@ export default function SnsPage() {
 
             const totalPosts = Math.max(0, Number(statsResult.data.totalPosts || 0))
             const totalFriends = Math.max(0, Number(statsResult.data.totalFriends || 0))
+            const myPosts = (typeof statsResult.data.myPosts === 'number' && Number.isFinite(statsResult.data.myPosts) && statsResult.data.myPosts >= 0)
+                ? Math.floor(statsResult.data.myPosts)
+                : null
             let earliestTime: number | null = null
             let latestTime: number | null = null
 
@@ -256,6 +264,7 @@ export default function SnsPage() {
             const nextOverviewStats = {
                 totalPosts,
                 totalFriends,
+                myPosts,
                 earliestTime,
                 latestTime
             }
@@ -279,7 +288,8 @@ export default function SnsPage() {
         if (overviewStatsStatus === 'loading') {
             return '统计中...'
         }
-        return `共 ${overviewStats.totalPosts} 条 ｜ ${formatDateOnly(overviewStats.earliestTime)} ~ ${formatDateOnly(overviewStats.latestTime)} ｜ ${overviewStats.totalFriends} 位好友`
+        const myPostsLabel = overviewStats.myPosts === null ? '--' : String(overviewStats.myPosts)
+        return `共 ${overviewStats.totalPosts} 条 ｜ 我的朋友圈 ${myPostsLabel} 条 ｜ ${formatDateOnly(overviewStats.earliestTime)} ~ ${formatDateOnly(overviewStats.latestTime)} ｜ ${overviewStats.totalFriends} 位好友`
     }
 
     const loadPosts = useCallback(async (options: { reset?: boolean, direction?: 'older' | 'newer' } = {}) => {
