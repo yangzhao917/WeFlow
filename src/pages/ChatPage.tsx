@@ -672,7 +672,6 @@ function ChatPage(props: ChatPageProps) {
   }, [])
 
   const updateJumpPopoverPosition = useCallback(() => {
-    if (!standaloneSessionWindow) return
     const anchor = jumpCalendarWrapRef.current
     if (!anchor) return
 
@@ -694,7 +693,7 @@ function ChatPage(props: ChatPageProps) {
       if (prev.top === top && prev.left === left) return prev
       return { top, left }
     })
-  }, [standaloneSessionWindow])
+  }, [])
 
   const handleToggleJumpPopover = useCallback(() => {
     if (!currentSessionId) return
@@ -703,15 +702,11 @@ function ChatPage(props: ChatPageProps) {
       return
     }
     setJumpPopoverDate(resolveCurrentViewDate())
-    if (standaloneSessionWindow) {
-      updateJumpPopoverPosition()
-    }
+    updateJumpPopoverPosition()
     setShowJumpPopover(true)
-    if (standaloneSessionWindow) {
-      requestAnimationFrame(() => updateJumpPopoverPosition())
-    }
+    requestAnimationFrame(() => updateJumpPopoverPosition())
     void loadJumpCalendarData(currentSessionId)
-  }, [currentSessionId, loadJumpCalendarData, resolveCurrentViewDate, showJumpPopover, standaloneSessionWindow, updateJumpPopoverPosition])
+  }, [currentSessionId, loadJumpCalendarData, resolveCurrentViewDate, showJumpPopover, updateJumpPopoverPosition])
 
   useEffect(() => {
     const unsubscribe = onExportSessionStatus((payload) => {
@@ -2775,17 +2770,17 @@ function ChatPage(props: ChatPageProps) {
       const target = event.target as Node | null
       if (!target) return
       if (jumpCalendarWrapRef.current?.contains(target)) return
-      if (standaloneSessionWindow && jumpPopoverPortalRef.current?.contains(target)) return
+      if (jumpPopoverPortalRef.current?.contains(target)) return
       setShowJumpPopover(false)
     }
     document.addEventListener('mousedown', handleGlobalPointerDown)
     return () => {
       document.removeEventListener('mousedown', handleGlobalPointerDown)
     }
-  }, [showJumpPopover, standaloneSessionWindow])
+  }, [showJumpPopover])
 
   useEffect(() => {
-    if (!showJumpPopover || !standaloneSessionWindow) return
+    if (!showJumpPopover) return
     const syncPosition = () => {
       requestAnimationFrame(() => updateJumpPopoverPosition())
     }
@@ -2797,7 +2792,7 @@ function ChatPage(props: ChatPageProps) {
       window.removeEventListener('resize', syncPosition)
       window.removeEventListener('scroll', syncPosition, true)
     }
-  }, [showJumpPopover, standaloneSessionWindow, updateJumpPopoverPosition])
+  }, [showJumpPopover, updateJumpPopoverPosition])
 
   useEffect(() => {
     setShowJumpPopover(false)
@@ -3834,21 +3829,8 @@ function ChatPage(props: ChatPageProps) {
                   >
                     <Calendar size={18} />
                   </button>
-                  {!standaloneSessionWindow && (
-                    <JumpToDatePopover
-                      isOpen={showJumpPopover}
-                      currentDate={jumpPopoverDate}
-                      onClose={() => setShowJumpPopover(false)}
-                      onSelect={handleJumpDateSelect}
-                      messageDates={messageDates}
-                      hasLoadedMessageDates={hasLoadedMessageDates}
-                      messageDateCounts={messageDateCounts}
-                      loadingDates={loadingDates}
-                      loadingDateCounts={loadingDateCounts}
-                    />
-                  )}
                 </div>
-                {standaloneSessionWindow && showJumpPopover && createPortal(
+                {showJumpPopover && createPortal(
                   <div
                     ref={jumpPopoverPortalRef}
                     style={{
