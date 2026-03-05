@@ -2,6 +2,9 @@ import type { ChatSession, Message, Contact, ContactInfo } from './models'
 
 export interface SessionChatWindowOpenOptions {
   source?: 'chat' | 'export'
+  initialDisplayName?: string
+  initialAvatarUrl?: string
+  initialContactType?: ContactInfo['type']
 }
 
 export interface ElectronAPI {

@@ -99,7 +99,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('window:openImageViewerWindow', imagePath, liveVideoPath),
     openChatHistoryWindow: (sessionId: string, messageId: number) =>
       ipcRenderer.invoke('window:openChatHistoryWindow', sessionId, messageId),
-    openSessionChatWindow: (sessionId: string, options?: { source?: 'chat' | 'export' }) =>
+    openSessionChatWindow: (
+      sessionId: string,
+      options?: {
+        source?: 'chat' | 'export'
+        initialDisplayName?: string
+        initialAvatarUrl?: string
+        initialContactType?: 'friend' | 'group' | 'official' | 'former_friend' | 'other'
+      }
+    ) =>
       ipcRenderer.invoke('window:openSessionChatWindow', sessionId, options)
   },
 

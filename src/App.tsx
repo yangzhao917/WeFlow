@@ -405,7 +405,19 @@ function App() {
     const params = new URLSearchParams(location.search)
     const sessionId = params.get('sessionId') || ''
     const standaloneSource = params.get('source')
-    return <ChatPage standaloneSessionWindow initialSessionId={sessionId} standaloneSource={standaloneSource} />
+    const standaloneInitialDisplayName = params.get('initialDisplayName')
+    const standaloneInitialAvatarUrl = params.get('initialAvatarUrl')
+    const standaloneInitialContactType = params.get('initialContactType')
+    return (
+      <ChatPage
+        standaloneSessionWindow
+        initialSessionId={sessionId}
+        standaloneSource={standaloneSource}
+        standaloneInitialDisplayName={standaloneInitialDisplayName}
+        standaloneInitialAvatarUrl={standaloneInitialAvatarUrl}
+        standaloneInitialContactType={standaloneInitialContactType}
+      />
+    )
   }
 
   // 独立通知窗口

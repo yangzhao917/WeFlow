@@ -126,21 +126,36 @@ interface AnnualReportYearsTaskState {
 
 interface OpenSessionChatWindowOptions {
   source?: 'chat' | 'export'
+  initialDisplayName?: string
+  initialAvatarUrl?: string
+  initialContactType?: 'friend' | 'group' | 'official' | 'former_friend' | 'other'
 }
 
 const normalizeSessionChatWindowSource = (source: unknown): 'chat' | 'export' => {
   return String(source || '').trim().toLowerCase() === 'export' ? 'export' : 'chat'
 }
 
+const normalizeSessionChatWindowOptionString = (value: unknown): string => {
+  return String(value || '').trim()
+}
+
 const loadSessionChatWindowContent = (
   win: BrowserWindow,
   sessionId: string,
-  source: 'chat' | 'export'
+  source: 'chat' | 'export',
+  options?: OpenSessionChatWindowOptions
 ) => {
-  const query = new URLSearchParams({
+  const queryParams = new URLSearchParams({
     sessionId,
     source
-  }).toString()
+  })
+  const initialDisplayName = normalizeSessionChatWindowOptionString(options?.initialDisplayName)
+  const initialAvatarUrl = normalizeSessionChatWindowOptionString(options?.initialAvatarUrl)
+  const initialContactType = normalizeSessionChatWindowOptionString(options?.initialContactType)
+  if (initialDisplayName) queryParams.set('initialDisplayName', initialDisplayName)
+  if (initialAvatarUrl) queryParams.set('initialAvatarUrl', initialAvatarUrl)
+  if (initialContactType) queryParams.set('initialContactType', initialContactType)
+  const query = queryParams.toString()
   if (process.env.VITE_DEV_SERVER_URL) {
     win.loadURL(`${process.env.VITE_DEV_SERVER_URL}#/chat-window?${query}`)
     return
@@ -724,7 +739,7 @@ function createSessionChatWindow(sessionId: string, options?: OpenSessionChatWin
   if (existing && !existing.isDestroyed()) {
     const trackedSource = sessionChatWindowSources.get(normalizedSessionId) || 'chat'
     if (trackedSource !== normalizedSource) {
-      loadSessionChatWindowContent(existing, normalizedSessionId, normalizedSource)
+      loadSessionChatWindowContent(existing, normalizedSessionId, normalizedSource, options)
       sessionChatWindowSources.set(normalizedSessionId, normalizedSource)
     }
     if (existing.isMinimized()) {
@@ -763,7 +778,7 @@ function createSessionChatWindow(sessionId: string, options?: OpenSessionChatWin
     autoHideMenuBar: true
   })
 
-  loadSessionChatWindowContent(win, normalizedSessionId, normalizedSource)
+  loadSessionChatWindowContent(win, normalizedSessionId, normalizedSource, options)
 
   if (process.env.VITE_DEV_SERVER_URL) {
     win.webContents.on('before-input-event', (event, input) => {
