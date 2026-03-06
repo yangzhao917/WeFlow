@@ -2101,7 +2101,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 12px var(--contacts-inline-padding);
+    padding: 12px 6px 12px var(--contacts-inline-padding);
     min-width: max(100%, var(--contacts-table-min-width));
     height: 72px;
     box-sizing: border-box;
