@@ -23,6 +23,7 @@ export class KeyServiceMac {
   private machVmRegion: any = null
   private machVmReadOverwrite: any = null
   private machPortDeallocate: any = null
+  private _needsElevation = false
 
   private getHelperPath(): string {
     const isPackaged = app.isPackaged
@@ -634,30 +635,27 @@ export class KeyServiceMac {
     ciphertext: Buffer,
     onProgress?: (message: string) => void
   ): Promise<string | null> {
-    // 优先通过 image_scan_helper 子进程调用（有 debugger entitlement）
+    // 优先通过 image_scan_helper 子进程调用
     try {
       const helperPath = this.getImageScanHelperPath()
       const ciphertextHex = ciphertext.toString('hex')
-      const result = await new Promise<string | null>((resolve, reject) => {
-        const child = spawn(helperPath, [String(pid), ciphertextHex], { stdio: ['ignore', 'pipe', 'pipe'] })
-        let stdout = ''
-        child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-        child.stderr.on('data', (chunk: Buffer) => { console.log('[image_scan_helper]', chunk.toString().trim()) })
-        child.on('error', reject)
-        child.on('close', () => {
-          try {
-            const lines = stdout.split(/\r?\n/).map(x => x.trim()).filter(Boolean)
-            const last = lines[lines.length - 1]
-            if (!last) { resolve(null); return }
-            const payload = JSON.parse(last)
-            resolve(payload?.success && payload?.aesKey ? payload.aesKey : null)
-          } catch {
-            resolve(null)
-          }
-        })
-        setTimeout(() => { try { child.kill('SIGTERM') } catch {} }, 30_000)
-      })
-      if (result) return result
+
+      // 1) 直接运行 helper（有正式签名的 debugger entitlement 时可用）
+      if (!this._needsElevation) {
+        const direct = await this._spawnScanHelper(helperPath, pid, ciphertextHex, false)
+        if (direct.key) return direct.key
+        if (direct.permissionError) {
+          console.warn('[KeyServiceMac] task_for_pid 权限不足，切换到 osascript 提权模式')
+          this._needsElevation = true
+          onProgress?.('需要管理员权限，请在弹出的对话框中输入密码...')
+        }
+      }
+
+      // 2) 通过 osascript 以管理员权限运行 helper（SIP 下 ad-hoc 签名无法获取 task_for_pid）
+      if (this._needsElevation) {
+        const elevated = await this._spawnScanHelper(helperPath, pid, ciphertextHex, true)
+        if (elevated.key) return elevated.key
+      }
     } catch (e: any) {
       console.warn('[KeyServiceMac] image_scan_helper unavailable, fallback to Mach API:', e?.message)
     }
@@ -755,6 +753,45 @@ export class KeyServiceMac {
     } finally {
       try { this.machPortDeallocate(selfTask, task) } catch { }
     }
+  }
+
+  private _spawnScanHelper(
+    helperPath: string, pid: number, ciphertextHex: string, elevated: boolean
+  ): Promise<{ key: string | null; permissionError: boolean }> {
+    return new Promise((resolve, reject) => {
+      let child: ReturnType<typeof spawn>
+      if (elevated) {
+        const shellCmd = `'${helperPath}' ${pid} ${ciphertextHex}`
+        child = spawn('osascript', ['-e', `do shell script ${JSON.stringify(shellCmd)} with administrator privileges`],
+          { stdio: ['ignore', 'pipe', 'pipe'] })
+      } else {
+        child = spawn(helperPath, [String(pid), ciphertextHex], { stdio: ['ignore', 'pipe', 'pipe'] })
+      }
+      const tag = elevated ? '[image_scan_helper:elevated]' : '[image_scan_helper]'
+      let stdout = '', stderr = ''
+      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString()
+        console.log(tag, chunk.toString().trim())
+      })
+      child.on('error', reject)
+      child.on('close', () => {
+        const permissionError = !elevated && stderr.includes('task_for_pid failed')
+        try {
+          const lines = stdout.split(/\r?\n/).map(x => x.trim()).filter(Boolean)
+          const last = lines[lines.length - 1]
+          if (!last) { resolve({ key: null, permissionError }); return }
+          const payload = JSON.parse(last)
+          resolve({
+            key: payload?.success && payload?.aesKey ? payload.aesKey : null,
+            permissionError
+          })
+        } catch {
+          resolve({ key: null, permissionError })
+        }
+      })
+      setTimeout(() => { try { child.kill('SIGTERM') } catch {} }, elevated ? 60_000 : 30_000)
+    })
   }
 
   private async findWeChatPid(): Promise<number | null> {
