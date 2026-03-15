@@ -1127,7 +1127,7 @@ class ExportService {
           if (xmlType === '19') return title ? `[聊天记录] ${title}` : '[聊天记录]'
           if (xmlType === '33' || xmlType === '36') return title ? `[小程序] ${title}` : '[小程序]'
           if (xmlType === '57') return title || '[引用消息]'
-          if (xmlType === '4' || xmlType === '5' || xmlType === '49') return title ? `[链接] ${title}` : '[链接]'
+          if (xmlType === '5' || xmlType === '49') return title ? `[链接] ${title}` : '[链接]'
 
           // 有 title 就返回 title
           if (title) return title
@@ -1200,7 +1200,6 @@ class ExportService {
       const typeMatch = /<type>(\d+)<\/type>/i.exec(normalized)
       const subType = typeMatch ? parseInt(typeMatch[1], 10) : 0
       const title = this.extractXmlValue(normalized, 'title') || this.extractXmlValue(normalized, 'appname')
-      const linkUrl = this.extractAppMessageLinkUrl(normalized)
 
       // 群公告消息（type 87）
       if (subType === 87) {
@@ -1258,9 +1257,6 @@ class ExportService {
       }
       if (subType === 57) {
         return title || '[引用消息]'
-      }
-      if (linkUrl) {
-        return title ? `[链接]${title}\n${linkUrl}` : linkUrl
       }
       if (title) {
         return `[链接]${title}`
@@ -1814,7 +1810,6 @@ class ExportService {
       normalized.includes('<msg>')
     const hasReferMsg = normalized.includes('<refermsg>')
     const xmlType = this.extractAppMessageType(normalized)
-    const appMsgUrl = this.extractAppMessageLinkUrl(normalized)
     const isFinder =
       xmlType === '51' ||
       normalized.includes('<finder') ||
@@ -1847,7 +1842,7 @@ class ExportService {
       appMsgKind = 'announcement'
     } else if (xmlType === '57' || hasReferMsg || localType === 244813135921) {
       appMsgKind = 'quote'
-    } else if (xmlType === '4' || xmlType === '5' || xmlType === '49' || appMsgUrl) {
+    } else if (xmlType === '5' || xmlType === '49') {
       appMsgKind = 'link'
     } else if (looksLikeAppMsg) {
       appMsgKind = 'card'
@@ -1887,7 +1882,11 @@ class ExportService {
 
     if (appMsgKind === 'link') {
       const linkCard = this.extractHtmlLinkCard(normalized, localType)
-      const linkUrl = linkCard?.url || appMsgUrl
+      const linkUrl = linkCard?.url || this.normalizeHtmlLinkUrl(
+        this.extractXmlValue(normalized, 'shareurl') ||
+        this.extractXmlValue(normalized, 'shorturl') ||
+        this.extractXmlValue(normalized, 'dataurl')
+      )
       if (linkCard?.title) meta.linkTitle = linkCard.title
       if (linkUrl) meta.linkUrl = linkUrl
       if (appMsgThumbUrl) meta.linkThumb = appMsgThumbUrl
@@ -2072,17 +2071,6 @@ class ExportService {
     return this.formatPlainExportContent(content, localType, { exportVoiceAsText: false }, undefined, myWxid, senderWxid, isSend)
   }
 
-  private extractAppMessageLinkUrl(content: string): string {
-    const normalized = this.normalizeAppMessageContent(content)
-    return this.normalizeHtmlLinkUrl(
-      this.extractXmlValue(normalized, 'url') ||
-      this.extractXmlValue(normalized, 'shareurl') ||
-      this.extractXmlValue(normalized, 'shorturl') ||
-      this.extractXmlValue(normalized, 'dataurl') ||
-      this.extractXmlValue(normalized, 'lowurl')
-    )
-  }
-
   private extractHtmlLinkCard(content: string, localType: number): { title: string; url: string } | null {
     if (!content) return null
 
@@ -2091,9 +2079,9 @@ class ExportService {
     if (!isAppMessage) return null
 
     const subType = this.extractXmlValue(normalized, 'type')
-    if (subType && subType !== '4' && subType !== '5' && subType !== '49') return null
+    if (subType && subType !== '5' && subType !== '49') return null
 
-    const url = this.extractAppMessageLinkUrl(normalized)
+    const url = this.normalizeHtmlLinkUrl(this.extractXmlValue(normalized, 'url'))
     if (!url) return null
 
     const title = this.extractXmlValue(normalized, 'title') || this.extractXmlValue(normalized, 'des') || url
