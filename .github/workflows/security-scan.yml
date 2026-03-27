@@ -42,8 +42,7 @@ jobs:
 
       # 1. npm audit - 检查依赖漏洞
       - name: Dependency vulnerability audit
-        run: pnpm audit --audit-level=moderate
-        continue-on-error: true
+        run: pnpm audit --audit-level=moderate || true
 
       # 2. CodeQL 静态分析
       - name: Initialize CodeQL
