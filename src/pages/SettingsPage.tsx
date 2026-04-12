@@ -72,6 +72,25 @@ interface WxidOption {
   avatarUrl?: string
 }
 
+type SessionFilterType = configService.MessagePushSessionType
+type SessionFilterTypeValue = 'all' | SessionFilterType
+type SessionFilterMode = 'all' | 'whitelist' | 'blacklist'
+
+interface SessionFilterOption {
+  username: string
+  displayName: string
+  avatarUrl?: string
+  type: SessionFilterType
+}
+
+const sessionFilterTypeOptions: Array<{ value: SessionFilterTypeValue; label: string }> = [
+  { value: 'all', label: '全部' },
+  { value: 'private', label: '私聊' },
+  { value: 'group', label: '群聊' },
+  { value: 'official', label: '订阅号/服务号' },
+  { value: 'other', label: '其他/非好友' }
+]
+
 interface SettingsPageProps {
   onClose?: () => void
 }
@@ -171,6 +190,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [quoteLayout, setQuoteLayout] = useState<configService.QuoteLayout>('quote-top')
   const [updateChannel, setUpdateChannel] = useState<configService.UpdateChannel>('stable')
   const [filterSearchKeyword, setFilterSearchKeyword] = useState('')
+  const [notificationTypeFilter, setNotificationTypeFilter] = useState<SessionFilterTypeValue>('all')
   const [filterModeDropdownOpen, setFilterModeDropdownOpen] = useState(false)
   const [positionDropdownOpen, setPositionDropdownOpen] = useState(false)
   const [closeBehaviorDropdownOpen, setCloseBehaviorDropdownOpen] = useState(false)
@@ -230,7 +250,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [messagePushFilterList, setMessagePushFilterList] = useState<string[]>([])
   const [messagePushFilterDropdownOpen, setMessagePushFilterDropdownOpen] = useState(false)
   const [messagePushFilterSearchKeyword, setMessagePushFilterSearchKeyword] = useState('')
-  const [messagePushTypeFilter, setMessagePushTypeFilter] = useState<'all' | configService.MessagePushSessionType>('all')
+  const [messagePushTypeFilter, setMessagePushTypeFilter] = useState<SessionFilterTypeValue>('all')
   const [messagePushContactOptions, setMessagePushContactOptions] = useState<ContactInfo[]>([])
   const [antiRevokeSearchKeyword, setAntiRevokeSearchKeyword] = useState('')
   const [antiRevokeSelectedIds, setAntiRevokeSelectedIds] = useState<Set<string>>(new Set())
@@ -1658,15 +1678,6 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   )
 
   const renderNotificationTab = () => {
-    // 获取已过滤会话的信息
-    const getSessionInfo = (username: string) => {
-      const session = chatSessions.find(s => s.username === username)
-      return {
-        displayName: session?.displayName || username,
-        avatarUrl: session?.avatarUrl || ''
-      }
-    }
-
     // 添加会话到过滤列表
     const handleAddToFilterList = async (username: string) => {
       if (notificationFilterList.includes(username)) return
@@ -1683,18 +1694,6 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       await configService.setNotificationFilterList(newList)
       showMessage('已从过滤列表移除', true)
     }
-
-    // 过滤掉已在列表中的会话，并根据搜索关键字过滤
-    const availableSessions = chatSessions.filter(s => {
-      if (notificationFilterList.includes(s.username)) return false
-      if (filterSearchKeyword) {
-        const keyword = filterSearchKeyword.toLowerCase()
-        const displayName = (s.displayName || '').toLowerCase()
-        const username = s.username.toLowerCase()
-        return displayName.includes(keyword) || username.includes(keyword)
-      }
-      return true
-    })
 
     return (
       <div className="tab-content">
@@ -1787,17 +1786,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                 <div
                   key={option.value}
                   className={`custom-select-option ${notificationFilterMode === option.value ? 'selected' : ''}`}
-                  onClick={async () => {
-                    const val = option.value as 'all' | 'whitelist' | 'blacklist'
-                    setNotificationFilterMode(val)
-                    setFilterModeDropdownOpen(false)
-                    await configService.setNotificationFilterMode(val)
-                    showMessage(
-                      val === 'all' ? '已设为接收所有通知' :
-                        val === 'whitelist' ? '已设为仅接收白名单通知' : '已设为屏蔽黑名单通知',
-                      true
-                    )
-                  }}
+                  onClick={() => { void handleSetNotificationFilterMode(option.value as SessionFilterMode) }}
                 >
                   {option.label}
                   {notificationFilterMode === option.value && <Check size={14} />}
@@ -1816,11 +1805,33 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                 : '点击左侧会话添加到黑名单，点击右侧会话从黑名单移除'}
             </span>
 
+            <div className="push-filter-type-tabs">
+              {sessionFilterTypeOptions.map(option => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`push-filter-type-tab ${notificationTypeFilter === option.value ? 'active' : ''}`}
+                  onClick={() => setNotificationTypeFilter(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
             <div className="notification-filter-container">
               {/* 可选会话列表 */}
               <div className="filter-panel">
                 <div className="filter-panel-header">
                   <span>可选会话</span>
+                  {notificationAvailableSessions.length > 0 && (
+                    <button
+                      type="button"
+                      className="filter-panel-action"
+                      onClick={() => { void handleAddAllNotificationFilterSessions() }}
+                    >
+                      全选当前
+                    </button>
+                  )}
                   <div className="filter-search-box">
                     <Search size={14} />
                     <input
@@ -1832,8 +1843,8 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                   </div>
                 </div>
                 <div className="filter-panel-list">
-                  {availableSessions.length > 0 ? (
-                    availableSessions.map(session => (
+                  {notificationAvailableSessions.length > 0 ? (
+                    notificationAvailableSessions.map(session => (
                       <div
                         key={session.username}
                         className="filter-panel-item"
@@ -1845,12 +1856,13 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                           size={28}
                         />
                         <span className="filter-item-name">{session.displayName || session.username}</span>
+                        <span className="filter-item-type">{getSessionFilterTypeLabel(session.type)}</span>
                         <span className="filter-item-action">+</span>
                       </div>
                     ))
                   ) : (
                     <div className="filter-panel-empty">
-                      {filterSearchKeyword ? '没有匹配的会话' : '暂无可添加的会话'}
+                      {filterSearchKeyword || notificationTypeFilter !== 'all' ? '没有匹配的会话' : '暂无可添加的会话'}
                     </div>
                   )}
                 </div>
@@ -1863,11 +1875,20 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                   {notificationFilterList.length > 0 && (
                     <span className="filter-panel-count">{notificationFilterList.length}</span>
                   )}
+                  {notificationFilterList.length > 0 && (
+                    <button
+                      type="button"
+                      className="filter-panel-action"
+                      onClick={() => { void handleRemoveAllNotificationFilterSessions() }}
+                    >
+                      全不选
+                    </button>
+                  )}
                 </div>
                 <div className="filter-panel-list">
                   {notificationFilterList.length > 0 ? (
                     notificationFilterList.map(username => {
-                      const info = getSessionInfo(username)
+                      const info = getSessionFilterOptionInfo(username)
                       return (
                         <div
                           key={username}
@@ -1880,6 +1901,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                             size={28}
                           />
                           <span className="filter-item-name">{info.displayName}</span>
+                          <span className="filter-item-type">{getSessionFilterTypeLabel(info.type)}</span>
                           <span className="filter-item-action">×</span>
                         </div>
                       )
@@ -2533,7 +2555,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     showMessage(enabled ? '已开启主动推送' : '已关闭主动推送', true)
   }
 
-  const getMessagePushSessionType = (session: { username: string; type?: ContactInfo['type'] | number }): configService.MessagePushSessionType => {
+  const getSessionFilterType = (session: { username: string; type?: ContactInfo['type'] | number }): SessionFilterType => {
     const username = String(session.username || '').trim()
     if (username.endsWith('@chatroom')) return 'group'
     if (username.startsWith('gh_') || session.type === 'official') return 'official'
@@ -2542,7 +2564,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     return 'private'
   }
 
-  const getMessagePushTypeLabel = (type: configService.MessagePushSessionType) => {
+  const getSessionFilterTypeLabel = (type: SessionFilterType) => {
     switch (type) {
       case 'private': return '私聊'
       case 'group': return '群聊'
@@ -2586,36 +2608,38 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     showMessage(`已添加 ${usernames.length} 个会话`, true)
   }
 
-  const messagePushOptionMap = new Map<string, {
-    username: string
-    displayName: string
-    avatarUrl?: string
-    type: configService.MessagePushSessionType
-  }>()
+  const handleRemoveAllMessagePushFilterSessions = async () => {
+    if (messagePushFilterList.length === 0) return
+    setMessagePushFilterList([])
+    await configService.setMessagePushFilterList([])
+    showMessage('已清空主动推送过滤列表', true)
+  }
+
+  const sessionFilterOptionMap = new Map<string, SessionFilterOption>()
 
   for (const session of chatSessions) {
     if (session.username.toLowerCase().includes('placeholder_foldgroup')) continue
-    messagePushOptionMap.set(session.username, {
+    sessionFilterOptionMap.set(session.username, {
       username: session.username,
       displayName: session.displayName || session.username,
       avatarUrl: session.avatarUrl,
-      type: getMessagePushSessionType(session)
+      type: getSessionFilterType(session)
     })
   }
 
   for (const contact of messagePushContactOptions) {
     if (!contact.username) continue
     if (contact.type !== 'friend' && contact.type !== 'group' && contact.type !== 'official' && contact.type !== 'former_friend') continue
-    const existing = messagePushOptionMap.get(contact.username)
-    messagePushOptionMap.set(contact.username, {
+    const existing = sessionFilterOptionMap.get(contact.username)
+    sessionFilterOptionMap.set(contact.username, {
       username: contact.username,
       displayName: existing?.displayName || contact.displayName || contact.remark || contact.nickname || contact.username,
       avatarUrl: existing?.avatarUrl || contact.avatarUrl,
-      type: getMessagePushSessionType(contact)
+      type: getSessionFilterType(contact)
     })
   }
 
-  const messagePushOptions = Array.from(messagePushOptionMap.values())
+  const sessionFilterOptions = Array.from(sessionFilterOptionMap.values())
     .sort((a, b) => {
       const aSession = chatSessions.find(session => session.username === a.username)
       const bSession = chatSessions.find(session => session.username === b.username)
@@ -2623,24 +2647,69 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
         Number(aSession?.sortTimestamp || aSession?.lastTimestamp || 0)
     })
 
-  const messagePushAvailableSessions = messagePushOptions.filter(session => {
-    if (messagePushFilterList.includes(session.username)) return false
-    if (messagePushTypeFilter !== 'all' && session.type !== messagePushTypeFilter) return false
-    if (messagePushFilterSearchKeyword.trim()) {
-      const keyword = messagePushFilterSearchKeyword.trim().toLowerCase()
-      return String(session.displayName || '').toLowerCase().includes(keyword) ||
-        session.username.toLowerCase().includes(keyword)
-    }
-    return true
-  })
-
-  const getMessagePushOptionInfo = (username: string) => {
-    return messagePushOptionMap.get(username) || {
+  const getSessionFilterOptionInfo = (username: string) => {
+    return sessionFilterOptionMap.get(username) || {
       username,
       displayName: username,
       avatarUrl: undefined,
-      type: 'other' as configService.MessagePushSessionType
+      type: 'other' as SessionFilterType
     }
+  }
+
+  const getAvailableSessionFilterOptions = (
+    selectedList: string[],
+    typeFilter: SessionFilterTypeValue,
+    searchKeyword: string
+  ) => {
+    const keyword = searchKeyword.trim().toLowerCase()
+    return sessionFilterOptions.filter(session => {
+      if (selectedList.includes(session.username)) return false
+      if (typeFilter !== 'all' && session.type !== typeFilter) return false
+      if (keyword) {
+        return String(session.displayName || '').toLowerCase().includes(keyword) ||
+          session.username.toLowerCase().includes(keyword)
+      }
+      return true
+    })
+  }
+
+  const notificationAvailableSessions = getAvailableSessionFilterOptions(
+    notificationFilterList,
+    notificationTypeFilter,
+    filterSearchKeyword
+  )
+
+  const messagePushAvailableSessions = getAvailableSessionFilterOptions(
+    messagePushFilterList,
+    messagePushTypeFilter,
+    messagePushFilterSearchKeyword
+  )
+
+  const handleAddAllNotificationFilterSessions = async () => {
+    const usernames = notificationAvailableSessions.map(session => session.username)
+    if (usernames.length === 0) return
+    const next = Array.from(new Set([...notificationFilterList, ...usernames]))
+    setNotificationFilterList(next)
+    await configService.setNotificationFilterList(next)
+    showMessage(`已添加 ${usernames.length} 个会话`, true)
+  }
+
+  const handleRemoveAllNotificationFilterSessions = async () => {
+    if (notificationFilterList.length === 0) return
+    setNotificationFilterList([])
+    await configService.setNotificationFilterList([])
+    showMessage('已清空通知过滤列表', true)
+  }
+
+  const handleSetNotificationFilterMode = async (mode: SessionFilterMode) => {
+    setNotificationFilterMode(mode)
+    setFilterModeDropdownOpen(false)
+    await configService.setNotificationFilterMode(mode)
+    showMessage(
+      mode === 'all' ? '已设为接收所有通知' :
+        mode === 'whitelist' ? '已设为仅接收白名单通知' : '已设为屏蔽黑名单通知',
+      true
+    )
   }
 
   const handleTestInsightConnection = async () => {
@@ -3518,18 +3587,12 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
               : '点击左侧会话添加到黑名单，黑名单会话不会推送'}
           </span>
           <div className="push-filter-type-tabs">
-            {[
-              { value: 'all', label: '全部' },
-              { value: 'private', label: '私聊' },
-              { value: 'group', label: '群聊' },
-              { value: 'official', label: '订阅号/服务号' },
-              { value: 'other', label: '其他/非好友' }
-            ].map(option => (
+            {sessionFilterTypeOptions.map(option => (
               <button
                 key={option.value}
                 type="button"
                 className={`push-filter-type-tab ${messagePushTypeFilter === option.value ? 'active' : ''}`}
-                onClick={() => setMessagePushTypeFilter(option.value as 'all' | configService.MessagePushSessionType)}
+                onClick={() => setMessagePushTypeFilter(option.value)}
               >
                 {option.label}
               </button>
@@ -3572,13 +3635,13 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                         size={28}
                       />
                       <span className="filter-item-name">{session.displayName || session.username}</span>
-                      <span className="filter-item-type">{getMessagePushTypeLabel(session.type)}</span>
+                      <span className="filter-item-type">{getSessionFilterTypeLabel(session.type)}</span>
                       <span className="filter-item-action">+</span>
                     </div>
                   ))
                 ) : (
                   <div className="filter-panel-empty">
-                    {messagePushFilterSearchKeyword ? '没有匹配的会话' : '暂无可添加的会话'}
+                    {messagePushFilterSearchKeyword || messagePushTypeFilter !== 'all' ? '没有匹配的会话' : '暂无可添加的会话'}
                   </div>
                 )}
               </div>
@@ -3590,11 +3653,20 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                 {messagePushFilterList.length > 0 && (
                   <span className="filter-panel-count">{messagePushFilterList.length}</span>
                 )}
+                {messagePushFilterList.length > 0 && (
+                  <button
+                    type="button"
+                    className="filter-panel-action"
+                    onClick={() => { void handleRemoveAllMessagePushFilterSessions() }}
+                  >
+                    全不选
+                  </button>
+                )}
               </div>
               <div className="filter-panel-list">
                 {messagePushFilterList.length > 0 ? (
                   messagePushFilterList.map(username => {
-                    const session = getMessagePushOptionInfo(username)
+                    const session = getSessionFilterOptionInfo(username)
                     return (
                       <div
                         key={username}
@@ -3607,7 +3679,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                           size={28}
                         />
                         <span className="filter-item-name">{session.displayName || username}</span>
-                        <span className="filter-item-type">{getMessagePushTypeLabel(session.type)}</span>
+                        <span className="filter-item-type">{getSessionFilterTypeLabel(session.type)}</span>
                         <span className="filter-item-action">×</span>
                       </div>
                     )
