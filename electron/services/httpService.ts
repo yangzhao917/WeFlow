@@ -370,6 +370,17 @@ class HttpService {
                 await this.handleMessages(url, res)
             } else if (pathname === '/api/v1/sessions') {
                 await this.handleSessions(url, res)
+            } else if (
+                pathname.startsWith('/api/v1/sessions/') &&
+                pathname.endsWith('/messages')
+            ) {
+                const parts = pathname.split('/')
+                const sessionId = decodeURIComponent(parts[4] || '')
+                if (!sessionId) {
+                    this.sendError(res, 400, 'Missing session ID')
+                } else {
+                    await this.handlePullMessages(sessionId, url, res)
+                }
             } else if (pathname === '/api/v1/contacts') {
                 await this.handleContacts(url, res)
             } else if (pathname === '/api/v1/group-members') {
@@ -736,6 +747,7 @@ class HttpService {
   private async handleSessions(url: URL, res: http.ServerResponse): Promise<void> {
     const keyword = (url.searchParams.get('keyword') || '').trim()
     const limit = this.parseIntParam(url.searchParams.get('limit'), 100, 1, 10000)
+    const format = (url.searchParams.get('format') || '').trim().toLowerCase()
 
     try {
       const sessions = await chatService.getSessions()
@@ -753,8 +765,21 @@ class HttpService {
         )
       }
 
-      // 应用 limit
       const limitedSessions = filteredSessions.slice(0, limit)
+
+      if (format === 'chatlab') {
+        this.sendJson(res, {
+          sessions: limitedSessions.map(s => ({
+            id: s.username,
+            name: s.displayName || s.username,
+            platform: 'wechat',
+            type: s.username.endsWith('@chatroom') ? 'group' : 'private',
+            messageCount: s.messageCountHint || undefined,
+            lastMessageAt: s.lastTimestamp
+          }))
+        })
+        return
+      }
 
       this.sendJson(res, {
         success: true,
@@ -768,6 +793,53 @@ class HttpService {
         }))
       })
     } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /**
+   * ChatLab Pull: GET /api/v1/sessions/:id/messages?since=&limit=&offset=&end=
+   * 返回 ChatLab 标准格式 + sync 分页块
+   */
+  private async handlePullMessages(sessionId: string, url: URL, res: http.ServerResponse): Promise<void> {
+    const PULL_MAX_LIMIT = 5000
+    const limit = this.parseIntParam(url.searchParams.get('limit'), PULL_MAX_LIMIT, 1, PULL_MAX_LIMIT)
+    const offset = this.parseIntParam(url.searchParams.get('offset'), 0, 0, Number.MAX_SAFE_INTEGER)
+    const sinceParam = url.searchParams.get('since')
+    const endParam = url.searchParams.get('end')
+
+    const startTime = sinceParam ? this.parseTimeParam(sinceParam) : 0
+    const endTime = endParam ? this.parseTimeParam(endParam, true) : 0
+
+    try {
+      const result = await this.fetchMessagesBatch(sessionId, offset, limit, startTime, endTime, true)
+      if (!result.success || !result.messages) {
+        this.sendError(res, 500, result.error || 'Failed to get messages')
+        return
+      }
+
+      const messages = result.messages
+      const hasMore = result.hasMore === true
+
+      const displayNames = await this.getDisplayNames([sessionId])
+      const talkerName = displayNames[sessionId] || sessionId
+      const chatLabData = await this.convertToChatLab(messages, sessionId, talkerName)
+
+      const lastTimestamp = messages.length > 0
+        ? messages[messages.length - 1].createTime
+        : undefined
+
+      this.sendJson(res, {
+        ...chatLabData,
+        sync: {
+          hasMore,
+          nextSince: hasMore && lastTimestamp ? lastTimestamp : undefined,
+          nextOffset: hasMore ? offset + messages.length : undefined,
+          watermark: Math.floor(Date.now() / 1000)
+        }
+      })
+    } catch (error) {
+      console.error('[HttpService] handlePullMessages error:', error)
       this.sendError(res, 500, String(error))
     }
   }
