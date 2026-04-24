@@ -12,6 +12,15 @@ interface SessionBaseline {
   unreadCount: number
 }
 
+interface PushSessionResult {
+  fetched: boolean
+  maxFetchedTimestamp: number
+  incomingCandidateCount: number
+  observedIncomingCount: number
+  expectedIncomingCount: number
+  retry: boolean
+}
+
 interface MessagePushPayload {
   event: 'message.new'
   sessionId: string
@@ -37,10 +46,13 @@ class MessagePushService {
   private readonly configService: ConfigService
   private readonly sessionBaseline = new Map<string, SessionBaseline>()
   private readonly recentMessageKeys = new Map<string, number>()
+  private readonly seenMessageKeys = new Map<string, number>()
+  private readonly seenPrimedSessions = new Set<string>()
   private readonly groupNicknameCache = new Map<string, { nicknames: Record<string, string>; updatedAt: number }>()
   private readonly pushAvatarCacheDir: string
   private readonly pushAvatarDataCache = new Map<string, string>()
   private readonly debounceMs = 350
+  private readonly lookbackSeconds = 2
   private readonly recentMessageTtlMs = 10 * 60 * 1000
   private readonly groupNicknameCacheTtlMs = 5 * 60 * 1000
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -111,6 +123,8 @@ class MessagePushService {
   private resetRuntimeState(): void {
     this.sessionBaseline.clear()
     this.recentMessageKeys.clear()
+    this.seenMessageKeys.clear()
+    this.seenPrimedSessions.clear()
     this.groupNicknameCache.clear()
     this.baselineReady = false
     this.messageTableScanRequested = false
@@ -190,7 +204,6 @@ class MessagePushService {
       }
 
       const previousBaseline = new Map(this.sessionBaseline)
-      this.setBaseline(sessions)
 
       const candidates = sessions.filter((session) => {
         const previous = previousBaseline.get(session.username)
@@ -199,11 +212,24 @@ class MessagePushService {
         }
         return scanMessageBackedSessions && this.shouldScanMessageBackedSession(previous, session)
       })
+      const candidateIds = new Set<string>()
       for (const session of candidates) {
-        await this.pushSessionMessages(
+        const sessionId = String(session.username || '').trim()
+        if (sessionId) candidateIds.add(sessionId)
+        const result = await this.pushSessionMessages(
           session,
           previousBaseline.get(session.username) || this.sessionBaseline.get(session.username)
         )
+        this.updateInspectedBaseline(session, previousBaseline.get(session.username), result)
+        if (result.retry) {
+          this.rerunRequested = true
+        }
+      }
+
+      for (const session of sessions) {
+        const sessionId = String(session.username || '').trim()
+        if (!sessionId || candidateIds.has(sessionId)) continue
+        this.updateObservedBaseline(session, previousBaseline.get(sessionId))
       }
     } finally {
       this.processing = false
@@ -233,6 +259,40 @@ class MessagePushService {
     for (const [username, baseline] of nextBaseline.entries()) {
       this.sessionBaseline.set(username, baseline)
     }
+  }
+
+  private updateObservedBaseline(session: ChatSession, previous: SessionBaseline | undefined): void {
+    const username = String(session.username || '').trim()
+    if (!username) return
+
+    const sessionTimestamp = Number(session.lastTimestamp || 0)
+    const previousTimestamp = Number(previous?.lastTimestamp || 0)
+    this.sessionBaseline.set(username, {
+      lastTimestamp: Math.max(sessionTimestamp, previousTimestamp),
+      unreadCount: Number(session.unreadCount ?? previous?.unreadCount ?? 0)
+    })
+  }
+
+  private updateInspectedBaseline(
+    session: ChatSession,
+    previous: SessionBaseline | undefined,
+    result: PushSessionResult
+  ): void {
+    const username = String(session.username || '').trim()
+    if (!username) return
+
+    const previousTimestamp = Number(previous?.lastTimestamp || 0)
+    const current = this.sessionBaseline.get(username) || previous || { lastTimestamp: 0, unreadCount: 0 }
+    const nextTimestamp = result.retry
+      ? previousTimestamp
+      : Math.max(previousTimestamp, current.lastTimestamp, result.maxFetchedTimestamp)
+
+    this.sessionBaseline.set(username, {
+      lastTimestamp: nextTimestamp,
+      unreadCount: result.retry
+        ? Number(previous?.unreadCount || 0)
+        : Number(session.unreadCount || 0)
+    })
   }
 
   private shouldInspectSession(previous: SessionBaseline | undefined, session: ChatSession): boolean {
@@ -275,26 +335,84 @@ class MessagePushService {
     return Boolean(previous) || Number(session.lastTimestamp || 0) > 0
   }
 
-  private async pushSessionMessages(session: ChatSession, previous: SessionBaseline | undefined): Promise<void> {
-    const since = Math.max(0, Number(previous?.lastTimestamp || 0))
+  private async pushSessionMessages(session: ChatSession, previous: SessionBaseline | undefined): Promise<PushSessionResult> {
+    const previousTimestamp = Math.max(0, Number(previous?.lastTimestamp || 0))
+    const previousUnreadCount = Math.max(0, Number(previous?.unreadCount || 0))
+    const currentUnreadCount = Math.max(0, Number(session.unreadCount || 0))
+    const expectedIncomingCount = previous
+      ? Math.max(0, currentUnreadCount - previousUnreadCount)
+      : 0
+    const since = previous
+      ? Math.max(0, previousTimestamp - this.lookbackSeconds)
+      : 0
     const newMessagesResult = await chatService.getNewMessages(session.username, since, 1000)
     if (!newMessagesResult.success || !newMessagesResult.messages || newMessagesResult.messages.length === 0) {
-      return
+      return {
+        fetched: false,
+        maxFetchedTimestamp: previousTimestamp,
+        incomingCandidateCount: 0,
+        observedIncomingCount: 0,
+        expectedIncomingCount,
+        retry: expectedIncomingCount > 0
+      }
     }
+
+    const sessionId = String(session.username || '').trim()
+    const maxFetchedTimestamp = newMessagesResult.messages.reduce((max, message) => {
+      const createTime = Number(message.createTime || 0)
+      return Number.isFinite(createTime) && createTime > max ? createTime : max
+    }, previousTimestamp)
+    const seenPrimed = sessionId ? this.seenPrimedSessions.has(sessionId) : false
+    const sameTimestampIncoming: Message[] = []
+    const candidateMessages: Message[] = []
+    let observedIncomingCount = 0
 
     for (const message of newMessagesResult.messages) {
       const messageKey = String(message.messageKey || '').trim()
       if (!messageKey) continue
+      const createTime = Number(message.createTime || 0)
+      const seen = this.isSeenMessage(messageKey)
+      const recent = this.isRecentMessage(messageKey)
+
+      if (message.isSend !== 1) {
+        if (!previous || createTime > previousTimestamp || (seenPrimed && createTime === previousTimestamp)) {
+          observedIncomingCount += 1
+        }
+      }
+
+      if (previous && !seenPrimed && createTime < previousTimestamp) {
+        this.rememberSeenMessageKey(messageKey)
+        continue
+      }
+
+      if (seen || recent) {
+        continue
+      }
       if (message.isSend === 1) continue
-
-      if (previous && Number(message.createTime || 0) <= Number(previous.lastTimestamp || 0)) {
+      if (previous && !seenPrimed && createTime === previousTimestamp) {
+        sameTimestampIncoming.push(message)
         continue
       }
 
-      if (this.isRecentMessage(messageKey)) {
-        continue
-      }
+      candidateMessages.push(message)
+    }
 
+    const futureIncomingCount = candidateMessages.filter((message) => {
+      const createTime = Number(message.createTime || 0)
+      return !previous || createTime > previousTimestamp || seenPrimed
+    }).length
+    const sameTimestampAllowance = previous && !seenPrimed
+      ? Math.max(0, expectedIncomingCount - futureIncomingCount)
+      : 0
+    const selectedSameTimestamp = sameTimestampAllowance > 0
+      ? sameTimestampIncoming.slice(-sameTimestampAllowance)
+      : []
+    const messagesToPush = [...selectedSameTimestamp, ...candidateMessages]
+    const incomingCandidateCount = messagesToPush.length
+
+    for (const message of messagesToPush) {
+      const messageKey = String(message.messageKey || '').trim()
+      if (!messageKey) continue
       const payload = await this.buildPayload(session, message)
       if (!payload) continue
       if (!this.shouldPushPayload(payload)) continue
@@ -302,6 +420,21 @@ class MessagePushService {
       httpService.broadcastMessagePush(payload)
       this.rememberMessageKey(messageKey)
       this.bumpSessionBaseline(session.username, message)
+    }
+
+    for (const message of newMessagesResult.messages) {
+      const messageKey = String(message.messageKey || '').trim()
+      if (messageKey) this.rememberSeenMessageKey(messageKey)
+    }
+    if (sessionId) this.seenPrimedSessions.add(sessionId)
+
+    return {
+      fetched: true,
+      maxFetchedTimestamp,
+      incomingCandidateCount,
+      observedIncomingCount,
+      expectedIncomingCount,
+      retry: expectedIncomingCount > 0 && observedIncomingCount < expectedIncomingCount
     }
   }
 
@@ -558,11 +691,31 @@ class MessagePushService {
     this.pruneRecentMessageKeys()
   }
 
+  private isSeenMessage(messageKey: string): boolean {
+    this.pruneSeenMessageKeys()
+    const timestamp = this.seenMessageKeys.get(messageKey)
+    return typeof timestamp === 'number' && Date.now() - timestamp < this.recentMessageTtlMs
+  }
+
+  private rememberSeenMessageKey(messageKey: string): void {
+    this.seenMessageKeys.set(messageKey, Date.now())
+    this.pruneSeenMessageKeys()
+  }
+
   private pruneRecentMessageKeys(): void {
     const now = Date.now()
     for (const [key, timestamp] of this.recentMessageKeys.entries()) {
       if (now - timestamp > this.recentMessageTtlMs) {
         this.recentMessageKeys.delete(key)
+      }
+    }
+  }
+
+  private pruneSeenMessageKeys(): void {
+    const now = Date.now()
+    for (const [key, timestamp] of this.seenMessageKeys.entries()) {
+      if (now - timestamp > this.recentMessageTtlMs) {
+        this.seenMessageKeys.delete(key)
       }
     }
   }
