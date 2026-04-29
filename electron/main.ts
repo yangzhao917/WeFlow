@@ -3956,8 +3956,8 @@ function registerIpcHandlers() {
   })
 
   // 自动下载原图
-  ipcMain.handle('image:startAutoDownload', async () => {
-    return await imageDownloadService.startAutoDownload()
+  ipcMain.handle('image:startAutoDownload', async (_, whitelist?: string[]) => {
+    return await imageDownloadService.startAutoDownload(whitelist || [])
   })
 
   ipcMain.handle('image:stopAutoDownload', async () => {
@@ -4096,7 +4096,11 @@ app.whenReady().then(async () => {
   updateSplashProgress(28, '正在初始化...')
   registerIpcHandlers()
   if (configService.get('autoDownloadHighRes')) {
-    imageDownloadService.startAutoDownload()
+    const whitelistArr = configService.get('autoDownloadWhitelist') || []
+    const whitelistStr = (Array.isArray(whitelistArr) && whitelistArr.length > 0)
+      ? (whitelistArr.join('\0') + '\0\0')
+      : ''
+    imageDownloadService.startAutoDownload(whitelistStr)
   }
   chatService.addDbMonitorListener((type, json) => {
     messagePushService.handleDbMonitorChange(type, json)

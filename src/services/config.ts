@@ -120,7 +120,8 @@ export const CONFIG_KEYS = {
   AI_FOOTPRINT_ENABLED: 'aiFootprintEnabled',
   AI_FOOTPRINT_SYSTEM_PROMPT: 'aiFootprintSystemPrompt',
   AI_INSIGHT_DEBUG_LOG_ENABLED: 'aiInsightDebugLogEnabled',
-  AUTO_DOWNLOAD_HIGH_RES: 'autoDownloadHighRes'
+  AUTO_DOWNLOAD_HIGH_RES: 'autoDownloadHighRes',
+  AUTO_DOWNLOAD_WHITELIST: 'autoDownloadWhitelist'
 } as const
 
 export interface WxidConfig {
@@ -2155,5 +2156,15 @@ export async function getAutoDownloadHighRes(): Promise<boolean> {
 
 export async function setAutoDownloadHighRes(enabled: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.AUTO_DOWNLOAD_HIGH_RES, enabled)
+}
+
+export async function getAutoDownloadWhitelist(): Promise<string[]> {
+  const value = await config.get(CONFIG_KEYS.AUTO_DOWNLOAD_WHITELIST)
+  return Array.isArray(value) ? value : []
+}
+
+export async function setAutoDownloadWhitelist(list: string[]): Promise<void> {
+  const normalized = Array.from(new Set((list || []).map(item => String(item || '').trim()).filter(Boolean)))
+  await config.set(CONFIG_KEYS.AUTO_DOWNLOAD_WHITELIST, normalized)
 }
 

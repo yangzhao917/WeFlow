@@ -327,7 +327,11 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [aiFootprintEnabled, setAiFootprintEnabled] = useState(false)
   const [aiFootprintSystemPrompt, setAiFootprintSystemPrompt] = useState('')
   const [aiInsightDebugLogEnabled, setAiInsightDebugLogEnabled] = useState(false)
+
+  // 自动下载图片
   const [autoDownloadStatus, setAutoDownloadStatus] = useState<{ isHooked: boolean; pid: number | null; supported: boolean } | null>(null)
+  const [autoDownloadSelectedIds, setAutoDownloadSelectedIds] = useState<Set<string>>(new Set())
+  const [autoDownloadSearchKeyword, setAutoDownloadSearchKeyword] = useState('')
 
   // 检查 Hello 可用性
   useEffect(() => {
@@ -541,10 +545,11 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       setExcludeWordsInput(savedExcludeWords.join('\n'))
 
       const savedAutoDownloadHighRes = await configService.getAutoDownloadHighRes()
+      const savedAutoDownloadWhitelist = await configService.getAutoDownloadWhitelist()
       const savedAnalyticsConsent = await configService.getAnalyticsConsent()
       setAnalyticsConsent(savedAnalyticsConsent ?? false)
       setAutoDownloadHighRes(savedAutoDownloadHighRes)
-
+      setAutoDownloadSelectedIds(new Set(savedAutoDownloadWhitelist))
 
 
       // 如果语言列表为空，保存默认值
@@ -4695,96 +4700,173 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     </div>
   )
 
-  const renderAutoDownloadTab = () => (
-      <div className="tab-content">
-        <div className="updates-hero" style={{ background: 'linear-gradient(110deg, var(--bg-primary) 0%, rgba(245, 158, 11, 0.1) 100%)', borderColor: 'rgba(245, 158, 11, 0.3)' }}>
-          <div className="updates-hero-main">
-            <span className="updates-chip" style={{ color: '#f59e0b', background: 'rgba(245, 158, 11, 0.15)' }}>实验性功能</span>
-            <h2>自动下载原图</h2>
-            <p>强制微信在接收图片时下载高清原图，而非默认的模糊缩略图。</p>
-          </div>
-        </div>
+  const renderAutoDownloadTab = () => {
+    const sortedSessions = [...chatSessions].sort((a, b) => (b.sortTimestamp || 0) - (a.sortTimestamp || 0))
+    const keyword = autoDownloadSearchKeyword.trim().toLowerCase()
+    const filteredSessions = sortedSessions.filter((session) => {
+      if (!keyword) return true
+      return (session.displayName || '').toLowerCase().includes(keyword) ||
+          session.username.toLowerCase().includes(keyword)
+    })
+    const filteredSessionIds = filteredSessions.map((session) => session.username)
+    const selectedCount = autoDownloadSelectedIds.size
+    const selectedInFilteredCount = filteredSessionIds.filter((id) => autoDownloadSelectedIds.has(id)).length
+    const allFilteredSelected = filteredSessionIds.length > 0 && selectedInFilteredCount === filteredSessionIds.length
+    const isHooked = autoDownloadStatus?.isHooked
 
-        <div className="form-group" style={{ marginTop: '24px' }}>
-          <div className="setting-control vertical has-border">
-            <div className="log-toggle-line" style={{ marginTop: 0, border: 'none', background: 'transparent', padding: 0 }}>
-              <div>
-                <span className="log-status" style={{ fontSize: '15px', fontWeight: 600 }}>启用自动下载</span>
-                <div style={{ marginTop: '4px', fontSize: '13px', color: 'var(--text-tertiary)' }}>
-                  开启后，WeFlow 将通过远程 Hook 技术干预微信进程。
-                </div>
+    const persistWhitelist = (ids: Set<string>) => {
+      const whitelistArr = Array.from(ids)
+      configService.setAutoDownloadWhitelist(whitelistArr)
+      if (autoDownloadHighRes) {
+        // 转换为 wxid\0wxid\0wxid\0\0 格式
+        const whitelistStr = whitelistArr.length > 0 ? (whitelistArr.join('\0') + '\0\0') : '';
+        (window as any).electronAPI.image.startAutoDownload(whitelistStr)
+      }
+    }
+
+    const toggleSelection = (id: string) => {
+      const next = new Set(autoDownloadSelectedIds)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      setAutoDownloadSelectedIds(next)
+      persistWhitelist(next)
+    }
+
+    const selectAllFiltered = () => {
+      const next = new Set(autoDownloadSelectedIds)
+      filteredSessionIds.forEach(id => next.add(id))
+      setAutoDownloadSelectedIds(next)
+      persistWhitelist(next)
+    }
+
+    const clearSelection = () => {
+      const next = new Set<string>()
+      setAutoDownloadSelectedIds(next)
+      persistWhitelist(next)
+    }
+
+    return (
+        <div className="tab-content anti-revoke-tab">
+          {/* 顶部 Hero 区域 */}
+          <div className="anti-revoke-hero" style={{ background: 'linear-gradient(110deg, var(--bg-primary) 0%, rgba(245, 158, 11, 0.1) 100%)', borderColor: 'rgba(245, 158, 11, 0.3)' }}>
+            <div className="anti-revoke-hero-main">
+              <span className="updates-chip" style={{ color: '#f59e0b', background: 'rgba(245, 158, 11, 0.15)', width: 'fit-content' }}>测试功能 (Beta)</span>
+              <h2 style={{ marginTop: '8px' }}>自动下载原图</h2>
+              <p>强制微信在接收图片时下载高清原图。建议仅在必要会话中开启以节省流量和空间。</p>
+            </div>
+            <div className="anti-revoke-metrics">
+              <div className={`anti-revoke-metric ${isHooked ? 'is-installed' : 'is-pending'}`}>
+                <span className="label">服务状态</span>
+                <span className="value" style={{ fontSize: '14px' }}>
+                  {isHooked ? '正在监控' : autoDownloadHighRes ? '等待连接' : '未启用'}
+                </span>
               </div>
-              <label className="switch switch-lg" htmlFor="auto-download-high-res-toggle">
-                <input
-                    id="auto-download-high-res-toggle"
-                    className="switch-input"
-                    type="checkbox"
-                    checked={autoDownloadHighRes}
-                    onChange={handleToggleAutoDownload}
-                />
-                <span className="switch-slider" />
-              </label>
+              <div className="anti-revoke-metric">
+                <span className="label">已选会话</span>
+                <span className="value">{selectedCount}</span>
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="api-warning-modal" style={{ width: '100%', animation: 'none', boxShadow: 'none', border: '1px solid var(--border-color)', marginTop: '20px' }}>
-          <div className="modal-header" style={{ padding: '16px 20px', background: 'var(--bg-tertiary)' }}>
-            <ShieldCheck size={18} />
-            <h3 style={{ fontSize: '14px' }}>运行状态</h3>
+          <div className="anti-revoke-control-card">
+            <div className="anti-revoke-toolbar">
+              <div className="filter-search-box anti-revoke-search">
+                <Search size={14} />
+                <input
+                    type="text"
+                    placeholder="搜索联系人或群聊..."
+                    value={autoDownloadSearchKeyword}
+                    onChange={(e) => setAutoDownloadSearchKeyword(e.target.value)}
+                />
+              </div>
+              <div className="anti-revoke-toolbar-actions">
+                <div className="anti-revoke-btn-group">
+                  <button className="btn btn-secondary btn-sm" onClick={selectAllFiltered} disabled={filteredSessionIds.length === 0 || allFilteredSelected}>
+                    全选过滤
+                  </button>
+                  <button className="btn btn-secondary btn-sm" onClick={clearSelection} disabled={selectedCount === 0}>
+                    清空选择
+                  </button>
+                </div>
+                <div className="anti-revoke-btn-group" style={{ marginLeft: '12px', paddingLeft: '12px', borderLeft: '1px solid var(--border-color)' }}>
+                  <label className="switch switch-md" title={autoDownloadHighRes ? '关闭自动下载' : '开启自动下载'}>
+                    <input
+                        type="checkbox"
+                        checked={autoDownloadHighRes}
+                        onChange={() => handleToggleAutoDownload(Array.from(autoDownloadSelectedIds))}
+                    />
+                    <span className="switch-slider" />
+                  </label>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)', marginLeft: '8px' }}>
+                    {autoDownloadHighRes ? '已开启' : '已关闭'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="anti-revoke-batch-actions">
+              <div className="anti-revoke-selected-count">
+                <span>已选 <strong>{selectedCount}</strong> 个目标会话</span>
+                <span style={{ opacity: 0.6 }}>（若不选则默认对所有聊天生效）</span>
+              </div>
+            </div>
           </div>
-          <div className="modal-body" style={{ padding: '16px 20px' }}>
-            {!autoDownloadHighRes ? (
-                <div className="warning-item"><span style={{ color: 'var(--text-tertiary)' }}>服务未启动</span></div>
-            ) : !autoDownloadStatus ? (
-                <div className="warning-item"><span>正在检测状态...</span></div>
-            ) : !autoDownloadStatus.supported ? (
-                <div className="warning-item"><span style={{ color: 'var(--danger)' }}>⚠️ 当前系统架构不支持此功能（仅支持 Win32 x64）</span></div>
-            ) : autoDownloadStatus.isHooked ? (
-                <div className="warning-item">
-                  <span style={{ color: '#10b981', fontWeight: 'bold' }}>✓ 运行中</span>
-                  <span style={{ marginLeft: '12px', color: 'var(--text-secondary)' }}>已成功挂载到微信进程 (PID: {autoDownloadStatus.pid})</span>
-                </div>
+
+          <div className="anti-revoke-list">
+            <div className="anti-revoke-list-header">
+              <span>会话（{filteredSessions.length}）</span>
+              <span>选择</span>
+            </div>
+            {filteredSessions.length === 0 ? (
+                <div className="anti-revoke-empty">{autoDownloadSearchKeyword ? '没有匹配的会话' : '暂无会话'}</div>
             ) : (
-                <div className="warning-item">
-                  <span style={{ color: '#f59e0b', fontWeight: 'bold' }}>⏳ 等待中</span>
-                  <span style={{ marginLeft: '12px', color: 'var(--text-secondary)' }}>未检测到微信主进程 (Weixin.exe) 运行，请启动微信</span>
-                </div>
+                filteredSessions.map((session) => (
+                    <div
+                        key={session.username}
+                        className={`anti-revoke-row ${autoDownloadSelectedIds.has(session.username) ? 'selected' : ''}`}
+                        onClick={() => toggleSelection(session.username)}
+                    >
+                      <div className="anti-revoke-row-main">
+                        <Avatar src={session.avatarUrl} name={session.displayName} size={30} />
+                        <div className="anti-revoke-row-text">
+                          <span className="name">{session.displayName || session.username}</span>
+                          <span className="username" style={{ fontSize: '11px', opacity: 0.5 }}>{session.username}</span>
+                        </div>
+                      </div>
+                      <div className="anti-revoke-row-status">
+                        <span className={`anti-revoke-check ${autoDownloadSelectedIds.has(session.username) ? 'checked' : ''}`}>
+                          <Check size={14} />
+                        </span>
+                      </div>
+                    </div>
+                ))
             )}
           </div>
-        </div>
 
-        <div className="api-warning-modal" style={{ width: '100%', animation: 'none', boxShadow: 'none', border: '1px solid rgba(239, 68, 68, 0.3)', marginTop: '20px' }}>
-          <div className="modal-header" style={{ padding: '16px 20px', background: 'rgba(239, 68, 68, 0.05)', borderBottomColor: 'rgba(239, 68, 68, 0.2)' }}>
-            <ShieldCheck size={18} color="#ef4444" />
-            <h3 style={{ fontSize: '14px', color: '#ef4444' }}>风险提示</h3>
-          </div>
-          <div className="modal-body" style={{ padding: '16px 20px' }}>
-            <div className="warning-list">
-              <div className="warning-item">
-                <span className="bullet" style={{ color: '#ef4444' }}>•</span>
-                <span>此功能涉及hook修改微信进程内存</span>
-              </div>
-              <div className="warning-item">
-                <span className="bullet" style={{ color: '#ef4444' }}>•</span>
-                <span>虽然当前方案不直接注入 DLL，但<strong>仍存在被微信安全机制检测的风险</strong>。</span>
-              </div>
-              <div className="warning-item">
-                <span className="bullet" style={{ color: '#ef4444' }}>•</span>
-                <span>建议先少量测试使用，确认有无被检测的风险</span>
-              </div>
+          {/* 风险提示 */}
+          <div className="api-warning-modal" style={{ width: '100%', border: '1px solid rgba(239, 68, 68, 0.2)', marginTop: '16px', background: 'rgba(239, 68, 68, 0.02)', animation: 'none', boxShadow: 'none', position: 'static' }}>
+            <div className="modal-header" style={{ border: 'none', padding: '12px 20px 0' }}>
+              <Lock size={16} color="#ef4444" />
+              <h3 style={{ fontSize: '13px', color: '#ef4444' }}>风险警告</h3>
+            </div>
+            <div className="modal-body" style={{ fontSize: '12px', color: 'var(--text-secondary)', padding: '8px 20px 12px' }}>
+              此功能通过内存 Hook 修改微信行为，具有一定的风险。请尽量仅在白名单模式下针对必要会话开启。
             </div>
           </div>
         </div>
-      </div>
-  )
-  const handleToggleAutoDownload = async () => {
+    )
+  }
+  const handleToggleAutoDownload = async (whitelist?: string[] | string) => {
     const newVal = !autoDownloadHighRes
     setAutoDownloadHighRes(newVal)
 
     try {
       if (newVal) {
-        const result = await (window as any).electronAPI.image.startAutoDownload()
+        let currentWhitelist: string[] | string = whitelist || Array.from(autoDownloadSelectedIds)
+        if (Array.isArray(currentWhitelist)) {
+          currentWhitelist = currentWhitelist.length > 0 ? (currentWhitelist.join('\0') + '\0\0') : ''
+        }
+        const result = await (window as any).electronAPI.image.startAutoDownload(currentWhitelist)
         if (result && !result.success) {
           // 如果底层明确返回了失败
           throw new Error(result.error || '启动自动下载服务失败')

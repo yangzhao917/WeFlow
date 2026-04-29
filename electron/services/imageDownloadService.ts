@@ -12,7 +12,7 @@ export class ImageDownloadService {
   private koffi: any = null
   private lib: any = null
   private initialized = false
-  
+
   private initImgHelper: any = null
   private uninstallImgHelper: any = null
   private getImgHelperError: any = null
@@ -20,6 +20,8 @@ export class ImageDownloadService {
   private currentPid: number | null = null
   private pollTimer: NodeJS.Timeout | null = null
   private isHooked = false
+
+  private lastWhitelist: string[] = []
 
   static getInstance(): ImageDownloadService {
     if (!ImageDownloadService.instance) {
@@ -38,16 +40,14 @@ export class ImageDownloadService {
     try {
       this.koffi = require('koffi')
       const dllPath = this.getDllPath()
-      if (!existsSync(dllPath)) {
-        console.error(`[ImageDownloadService] dll not found: ${dllPath}`)
-        return false
-      }
+      if (!existsSync(dllPath)) return false
 
       this.lib = this.koffi.load(dllPath)
-      this.initImgHelper = this.lib.func('bool InitImgHelper(uint32)')
+
+      this.initImgHelper = this.lib.func('bool InitImgHelper(uint32, const char*)')
       this.uninstallImgHelper = this.lib.func('void UninstallImgHelper()')
       this.getImgHelperError = this.lib.func('const char* GetImgHelperError()')
-      
+
       this.initialized = true
       return true
     } catch (error) {
@@ -96,16 +96,22 @@ export class ImageDownloadService {
     }
   }
 
-  async startAutoDownload(): Promise<{ success: boolean; error?: string }> {
+  async startAutoDownload(whitelist: string[] | string = []): Promise<{ success: boolean; error?: string }> {
     if (!await this.ensureInitialized()) {
-      return { success: false, error: '核心组件初始化失败，请检查环境' }
+      return { success: false, error: '核心组件初始化失败' }
     }
 
-    if (this.pollTimer) return { success: true }
+    if (this.isHooked) {
+      await this.unhook()
+    }
 
-    this.pollTimer = setInterval(() => this.checkAndHook(), 30000)
-    // 首次尝试 Hook，并返回结果
-    return await this.checkAndHook(true)
+    this.lastWhitelist = whitelist
+
+    if (!this.pollTimer) {
+      this.pollTimer = setInterval(() => this.checkAndHook(this.lastWhitelist, false), 30000)
+    }
+
+    return await this.checkAndHook(whitelist, true)
   }
 
   async stopAutoDownload() {
@@ -116,7 +122,7 @@ export class ImageDownloadService {
     await this.unhook()
   }
 
-  private async checkAndHook(isManualStart = false): Promise<{ success: boolean; error?: string }> {
+  private async checkAndHook(whitelist: string[] | string = [], isManualStart = false): Promise<{ success: boolean; error?: string }> {
     const pid = await this.findMainWeChatPid()
 
     if (!pid) {
@@ -124,7 +130,6 @@ export class ImageDownloadService {
         console.log('[ImageDownloadService] WeChat exited, unhooking')
         await this.unhook()
       }
-      // 如果是手动开启时没找到进程，不认为是严重错误，只是挂起等待
       return { success: true, error: '等待微信启动' }
     }
 
@@ -139,7 +144,17 @@ export class ImageDownloadService {
 
     console.log(`[ImageDownloadService] attempting to hook PID: ${pid}`)
     try {
-      const success = this.initImgHelper(pid)
+      let whitelistBuffer: Buffer | null = null;
+      if (typeof whitelist === 'string') {
+        if (whitelist.length > 0) {
+          whitelistBuffer = Buffer.from(whitelist, 'utf8');
+        }
+      } else if (Array.isArray(whitelist) && whitelist.length > 0) {
+        whitelistBuffer = Buffer.from(whitelist.join('\0') + '\0\0', 'utf8');
+      }
+
+      const success = this.initImgHelper(pid, whitelistBuffer)
+
       if (success) {
         this.isHooked = true
         this.currentPid = pid
@@ -148,7 +163,6 @@ export class ImageDownloadService {
       } else {
         const err = this.getImgHelperError()
         console.error(`[ImageDownloadService] hook failed: ${err}`)
-        // 如果是手动点击开启时失败，停止轮询并向上报错
         if (isManualStart && this.pollTimer) {
           clearInterval(this.pollTimer)
           this.pollTimer = null

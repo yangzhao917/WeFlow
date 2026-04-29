@@ -366,7 +366,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('image:decryptProgress', listener)
       return () => ipcRenderer.removeListener('image:decryptProgress', listener)
     },
-    startAutoDownload: () => ipcRenderer.invoke('image:startAutoDownload'),
+    startAutoDownload: (whitelist: string[] | string) => ipcRenderer.invoke('image:startAutoDownload', whitelist),
     stopAutoDownload: () => ipcRenderer.invoke('image:stopAutoDownload'),
     getAutoDownloadStatus: () => ipcRenderer.invoke('image:getAutoDownloadStatus')
   },
